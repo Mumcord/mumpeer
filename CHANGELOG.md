@@ -21,3 +21,5 @@ All notable changes to mumpeer are listed here. The format follows
   Docker image `ghcr.io/mumcord/mumpeer`, and creates a draft GitHub release with `SHA256SUMS`.
 - Minimal logging: no full IP addresses, certificate hashes, tokens or secrets.
 - Docker image and a local test environment (`testenv/`) with network namespace profiles.
+- Logo, README and documentation: operator guide, configuration reference, bot API reference,
+  wire and handshake overview, troubleshooting, FAQ, and the pages of the GitHub wiki.
