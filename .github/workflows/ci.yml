@@ -1,0 +1,68 @@
+name: CI
+
+# Branch pushes run through their pull request; a push trigger on every branch would run
+# everything twice. A branch without a pull request can be checked with a manual run.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # No debug info: CI only needs pass/fail, and it makes linking faster and the caches smaller.
+  CARGO_PROFILE_DEV_DEBUG: 0
+
+jobs:
+  test:
+    name: Build and test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Rust format
+        run: cargo fmt --all --check
+
+      - name: Rust lint
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      # Includes the end-to-end relay tests on loopback (tests/relay.rs).
+      - name: Rust tests
+        run: cargo test --locked
+
+  # The image must start as non-root, print its fingerprint and answer /v1/status with the
+  # secret (spec AC-4.25).
+  docker:
+    name: Docker image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build the image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: mumpeer:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Status check
+        run: scripts/ci/image-check.sh mumpeer:ci
