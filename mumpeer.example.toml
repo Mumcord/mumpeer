@@ -1,0 +1,31 @@
+# mumpeer configuration. Copy to mumpeer.toml and adjust; every key except public_host has the
+# default shown here.
+
+# Address announced to Mumcord clients by the relay bot (DNS name or IP address).
+public_host = "relay.example.org"
+# Client relay listeners: QUIC on UDP and TLS on TCP (for networks that block UDP).
+udp_listen = "[::]:443"
+tcp_listen = "[::]:443"
+# Allowlist API for the relay bot. A non-loopback address switches it to HTTPS with the relay
+# certificate.
+api_listen = "127.0.0.1:7480"
+# Generated relay key and certificate (private, keep it on a volume).
+data_dir = "/var/lib/mumpeer"
+# The API secret (at least 32 random characters) comes from the environment variable
+# MUMPEER_API_SECRET or from this file. Never put the secret itself into this config.
+api_secret_file = "/run/secrets/mumpeer_api_secret"
+# Optional: your own certificate chain and key (PEM) instead of the generated identity.
+# cert_file = "/etc/mumpeer/cert.pem"
+# key_file = "/etc/mumpeer/key.pem"
+
+[limits]
+session_mbit = 10           # bandwidth per session and direction
+total_mbit = 200            # bandwidth of all sessions together
+max_sessions = 50
+max_sessions_per_peer = 4   # per client certificate
+token_ttl_s = 120           # both sides must connect within this time
+idle_timeout_s = 60
+max_session_s = 0           # 0 = unlimited
+conn_per_ip_per_min = 20
+failed_per_ip_per_min = 10  # then the address is blocked for 10 minutes
+pairs_per_min = 120
