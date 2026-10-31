@@ -145,6 +145,20 @@ docker build -t mumpeer:dev .
 `testenv/` holds a local test environment with a Mumble server, the relay bot and mumpeer, plus
 network namespaces that block direct connections or UDP; see [`testenv/README.md`](testenv/README.md).
 
+## Releasing
+
+Maintainers only. A release is built by pushing a version tag; publishing stays a manual step.
+
+1. Set the new version in `Cargo.toml`, run `cargo check` so `Cargo.lock` follows, and move the
+   `[Unreleased]` entries in `CHANGELOG.md` under the new version. Merge this to `main`.
+2. Tag the merge commit and push the tag: `git tag v0.2.0 && git push origin v0.2.0`.
+3. The `Release` workflow checks that the tag matches the Cargo version and points to a commit
+   on `main`, builds static Linux binaries (x86_64 and aarch64), and pushes the multi-arch image
+   to `ghcr.io/mumcord/mumpeer` with the version tag. Plain versions also move `latest`;
+   pre-release tags such as `v0.2.0-rc.1` do not.
+4. The workflow creates a **draft** GitHub release with the binaries and `SHA256SUMS`. Review it
+   and publish it by hand.
+
 ## License
 
 GNU Affero General Public License v3.0, see [`LICENSE`](LICENSE).
