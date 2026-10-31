@@ -23,7 +23,7 @@ addresses and the relay fingerprint.
 | Mumble server | port 44758 (TCP and UDP) | `mumblevoip/mumble-server:v1.5.735` |
 | mumpeer relay | port 44759 (UDP and TCP) | built from this checkout |
 | mumpeer API | `http://127.0.0.1:44760` | secret in `testenv/.env` (`MUMPEER_API_SECRET`) |
-| relay bot | user `RelayBot` | `MUMBOT_IMAGE` (default `ghcr.io/mumcord/mumbot:latest`) |
+| relay bot | user `RelayBot` | `MUMBOT_IMAGE` (default `ghcr.io/mumcord/mumbot:latest`; until a release contains `mumbot peer`, build it from Mumcord/mumbot and set `MUMBOT_IMAGE`) |
 
 Overrides: `MUMPEER_PORT_BASE` (server port; relay +1, API +2), `MUMPEER_PROJECT` (compose
 project and data dir, for parallel instances), `MUMBOT_IMAGE`, `MUMPEER_PUBLIC_HOST`,
