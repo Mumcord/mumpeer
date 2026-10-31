@@ -1,0 +1,173 @@
+name: Release
+
+# Pushing a tag `vX.Y.Z` on main checks that it matches the Cargo version, builds the static
+# Linux binaries and the multi-arch Docker image, and creates a DRAFT GitHub release with the
+# binaries and SHA256SUMS. The maintainer reviews and publishes the release by hand.
+on:
+  push:
+    tags: ["v*"]
+
+# Never build the same tag twice at once; never cancel a running release build.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  guard:
+    name: Check tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Full history, so the tagged commit can be checked against main.
+          fetch-depth: 0
+
+      - name: Check tag against the Cargo version and main
+        id: check
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          fail() { echo "::error::$1"; exit 1; }
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] \
+            || fail "Tag '$TAG' is not a version tag like v1.2.3."
+          version=${TAG#v}
+          cargo=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          [[ "$cargo" == "$version" ]] || fail "Cargo.toml version is '$cargo', but the tag says '$version'."
+          # The builds use --locked, so a stale Cargo.lock would fail late; catch it here.
+          locked=$(awk '$0 == "name = \"mumpeer\"" { getline; gsub(/version = |"/, ""); print; exit }' Cargo.lock)
+          [[ "$locked" == "$version" ]] || fail "Cargo.lock has mumpeer '$locked' (run cargo check after bumping)."
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main \
+            || fail "Tag '$TAG' does not point to a commit on main."
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  binaries:
+    name: Binary (${{ matrix.name }})
+    needs: guard
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            target: x86_64-unknown-linux-musl
+          - name: linux-aarch64
+            target: aarch64-unknown-linux-musl
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      # Static musl binaries, cross-compiled with zig in the same builder image as the Dockerfile
+      # (keep the two tags in sync; Dependabot only updates the Dockerfile).
+      - name: Build
+        run: |
+          docker run --rm -v "$PWD:/io" -w /io \
+            ghcr.io/rust-cross/cargo-zigbuild:0.24.0 \
+            cargo zigbuild --release --locked --target ${{ matrix.target }}
+          mkdir -p out && cp target/${{ matrix.target }}/release/mumpeer out/
+
+      - name: Package
+        env:
+          VERSION: ${{ needs.guard.outputs.version }}
+        run: |
+          cp LICENSE README.md CHANGELOG.md mumpeer.example.toml out/
+          mkdir dist
+          tar -C out -czf "dist/mumpeer-$VERSION-${{ matrix.name }}.tar.gz" .
+          ls -l dist
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mumpeer-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  docker:
+    name: Docker image
+    needs: guard
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      # `latest` only for plain versions; a pre-release tag like v0.2.0-rc.1 gets its version tag
+      # alone. The image is pushed right away, while the GitHub release stays a draft.
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/mumcord/mumpeer
+          tags: |
+            type=raw,value=${{ needs.guard.outputs.version }}
+            type=raw,value=latest,enable=${{ !contains(needs.guard.outputs.version, '-') }}
+
+      # The build stage cross-compiles on the runner's own platform, so arm64 needs no emulation.
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  release:
+    name: Draft release
+    needs: [guard, binaries, docker]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: mumpeer-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create the draft release
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.guard.outputs.version }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          # Fails if any binary is missing.
+          files=(mumpeer-*-linux-x86_64.tar.gz mumpeer-*-linux-aarch64.tar.gz)
+          ls -l -- "${files[@]}"
+          sha256sum -- "${files[@]}" > SHA256SUMS
+          cat SHA256SUMS
+          cat > ../notes.md <<EOF
+          ## Downloads
+
+          - **Linux** (static, any distribution): \`mumpeer-$VERSION-linux-x86_64.tar.gz\` or \`mumpeer-$VERSION-linux-aarch64.tar.gz\`
+          - **Docker** (linux/amd64, linux/arm64): \`docker pull ghcr.io/mumcord/mumpeer:$VERSION\`
+
+          Each archive holds the \`mumpeer\` binary at its top level. Check a download with \`sha256sum -c SHA256SUMS --ignore-missing\`. Start with the README and \`mumpeer.example.toml\` in the archive.
+
+          Built by [this workflow run]($RUN_URL). Licensed under the [GNU AGPL-3.0](https://github.com/Mumcord/mumpeer/blob/main/LICENSE) only.
+
+          Full changelog: [CHANGELOG.md](https://github.com/Mumcord/mumpeer/blob/main/CHANGELOG.md)
+          EOF
+          prerelease=()
+          [[ "$VERSION" == *-* ]] && prerelease=(--prerelease)
+          gh release create "$TAG" --draft "${prerelease[@]}" --verify-tag \
+            --title "Mumpeer $VERSION" --notes-file ../notes.md -- "${files[@]}" SHA256SUMS
