@@ -1,0 +1,23 @@
+# Build output
+/target/
+/dist/
+
+# Local secrets and test environment state
+.env
+.env.*
+!examples/*/.env.example
+*.pem
+*.key
+mumpeer.toml
+bot.toml
+testenv/data/
+testenv/certs/
+
+# Logs and editor/OS clutter
+*.log
+.DS_Store
+.idea/
+.vscode/
+
+# Agent worktrees
+.claude/worktrees/
