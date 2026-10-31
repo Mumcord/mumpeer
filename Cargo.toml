@@ -1,0 +1,50 @@
+[package]
+name = "mumpeer"
+description = "Relay server for Mumcord peer-to-peer features: forwards end-to-end encrypted QUIC packets between two Mumcord clients"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "AGPL-3.0-only"
+repository = "https://github.com/Mumcord/mumpeer"
+publish = false
+
+[dependencies]
+tokio = { version = "1.54", features = ["full"] }
+# ring instead of the default aws-lc-rs, like Mumcord's P2P crate: the same reviewed crypto
+# library, and static musl builds need no cmake.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging"] }
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+# Hashes (SHA-1 for Mumble certificate hashes, SHA-256 for fingerprints and tokens) and random
+# numbers; already in the tree through rustls.
+ring = "0.17"
+rcgen = "0.14"
+anyhow = "1"
+bytes = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive", "env"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1.1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unwrap_used = "warn"
+
+# Backtraces keep file and line numbers; full debug info would make target dirs much larger.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.release]
+# A long-running service: smaller binaries and image layers matter more than build time.
+lto = "thin"
+codegen-units = 1
+strip = true
