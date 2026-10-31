@@ -1,0 +1,50 @@
+# Local relay test environment: an unmodified Mumble server, the relay bot (mumbot peer) and
+# mumpeer built from this checkout. Start with ./up.sh, never with plain "docker compose up"
+# (up.sh generates the secret, certificates and configs, and registers the bot).
+#
+# All services use the host network, so clients in the netns.sh namespaces reach them at the
+# host address 10.77.255.1 without Docker's port forwarding in between, and the bot reaches the
+# relay API on loopback.
+services:
+  mumble:
+    image: mumblevoip/mumble-server:v1.5.735
+    restart: "no"
+    network_mode: host
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      MUMBLE_SUPERUSER_PASSWORD: ${SUPERUSER_PASSWORD:?run ./up.sh}
+      MUMBLE_ACCEPT_UNKNOWN_SETTINGS: "true"
+      MUMBLE_CONFIG_PORT: ${PORT_MUMBLE}
+      MUMBLE_CONFIG_SSLCERT: /certs/cert.pem
+      MUMBLE_CONFIG_SSLKEY: /certs/key.pem
+      MUMBLE_CONFIG_REGISTERNAME: Mumpeer Test Server
+      MUMBLE_CONFIG_AUTOBANATTEMPTS: "0"   # tests reconnect often; never ban them
+    volumes: ["./${DATA_ROOT}/mumble:/data", "./certs:/certs:ro"]
+
+  mumpeer:
+    build: ..
+    image: mumpeer:testenv
+    restart: "no"
+    network_mode: host
+    user: "${PUID:-1000}:${PGID:-1000}"
+    environment:
+      MUMPEER_API_SECRET: ${MUMPEER_API_SECRET:?run ./up.sh}
+      RUST_LOG: ${MUMPEER_LOG:-info}
+    volumes:
+      - ./${DATA_ROOT}/mumpeer.toml:/config/mumpeer.toml:ro
+      - ./${DATA_ROOT}/mumpeer:/var/lib/mumpeer
+
+  mumbot:
+    image: ${MUMBOT_IMAGE}
+    restart: "no"
+    network_mode: host
+    user: "${PUID:-1000}:${PGID:-1000}"
+    command: ["peer", "--config", "/config/bot.toml"]
+    environment:
+      MUMBOT_PEER_API_SECRET: ${MUMPEER_API_SECRET:?run ./up.sh}
+      MUMBOT_DATA: /data
+      RUST_LOG: ${MUMBOT_LOG:-info}
+    volumes:
+      - ./${DATA_ROOT}/bot.toml:/config/bot.toml:ro
+      - ./${DATA_ROOT}/mumbot:/data
