@@ -48,3 +48,6 @@ services:
     volumes:
       - ./${DATA_ROOT}/bot.toml:/config/bot.toml:ro
       - ./${DATA_ROOT}/mumbot:/data
+    # The image's check asks the webhook bot's /health; the peer bot has no HTTP listener.
+    healthcheck:
+      disable: true
