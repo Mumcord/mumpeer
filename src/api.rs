@@ -13,6 +13,7 @@ use tokio::sync::Semaphore;
 use tokio::time::timeout;
 use tokio_rustls::TlsAcceptor;
 
+use crate::broadcast::{AdmitError, BroadcastId, CreateError};
 use crate::config::ApiSecret;
 use crate::config::Uses;
 use crate::limits::log_prefix;
@@ -91,8 +92,10 @@ impl Response {
             204 => "No Content",
             400 => "Bad Request",
             401 => "Unauthorized",
+            403 => "Forbidden",
             404 => "Not Found",
             405 => "Method Not Allowed",
+            409 => "Conflict",
             413 => "Content Too Large",
             429 => "Too Many Requests",
             431 => "Request Header Fields Too Large",
@@ -230,12 +233,27 @@ struct PairRequest {
     r#use: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct BroadcastRequest {
+    publisher: String,
+    max_viewers: u16,
+}
+
+#[derive(Deserialize)]
+struct ViewerRequest {
+    viewer: String,
+}
+
+const NO_CONTENT: Response = Response {
+    status: 204,
+    body: None,
+};
+
 fn route(head: &Head, body: &[u8], relay: &Relay) -> Response {
     let path = head.path.as_str();
     match (head.method.as_str(), path) {
-        ("GET", "/v1/status") => Response::json(
-            200,
-            json!({
+        ("GET", "/v1/status") => {
+            let mut status = json!({
                 "v": 1,
                 "boot_id": relay.boot_id,
                 "host": relay.announced.host,
@@ -245,8 +263,15 @@ fn route(head: &Head, body: &[u8], relay: &Relay) -> Response {
                 "sessions": relay.sessions(),
                 "max_sessions": relay.max_sessions(),
                 "uses": relay.uses.enabled(),
-            }),
-        ),
+            });
+            // Absent, not null, when broadcasts are off (spec 07 §6.6).
+            if let Some(max_viewers) = relay.broadcasts.max_viewers()
+                && relay.uses.screen_share
+            {
+                status["broadcast"] = json!({ "max_viewers": max_viewers });
+            }
+            Response::json(200, status)
+        }
         ("POST", "/v1/pairs") => {
             let Ok(request) = serde_json::from_slice::<PairRequest>(body) else {
                 return Response::code(400, "bad_request");
@@ -281,17 +306,85 @@ fn route(head: &Head, body: &[u8], relay: &Relay) -> Response {
             match cert_hash(&path["/v1/peers/".len()..]) {
                 Some(hash) => {
                     relay.drop_peer(&hash);
-                    Response {
-                        status: 204,
-                        body: None,
-                    }
+                    NO_CONTENT
                 }
                 None => Response::code(400, "bad_request"),
             }
         }
-        (_, "/v1/status" | "/v1/pairs") => Response::code(405, "method_not_allowed"),
+        ("POST", "/v1/broadcasts") => create_broadcast(body, relay),
+        (method, _) if path.starts_with("/v1/broadcasts/") => {
+            broadcast_route(method, &path["/v1/broadcasts/".len()..], body, relay)
+        }
+        (_, "/v1/status" | "/v1/pairs" | "/v1/broadcasts") => {
+            Response::code(405, "method_not_allowed")
+        }
         (_, _) if path.starts_with("/v1/peers/") => Response::code(405, "method_not_allowed"),
         _ => Response::code(404, "not_found"),
+    }
+}
+
+fn create_broadcast(body: &[u8], relay: &Relay) -> Response {
+    let Ok(request) = serde_json::from_slice::<BroadcastRequest>(body) else {
+        return Response::code(400, "bad_request");
+    };
+    let Some(publisher) = cert_hash(&request.publisher) else {
+        return Response::code(400, "bad_request");
+    };
+    if request.max_viewers == 0 {
+        return Response::code(400, "bad_request");
+    }
+    if !relay.uses.screen_share {
+        return Response::code(403, "use_not_allowed");
+    }
+    match relay.broadcasts.create(publisher, request.max_viewers) {
+        Ok((id, token)) => Response::json(
+            201,
+            json!({ "id": id.to_string(), "tok": token, "expires_in": relay.token_ttl_s() }),
+        ),
+        Err(CreateError::RelayFull) => Response::code(503, "relay_full"),
+    }
+}
+
+/// `{id}`, `{id}/viewers` and `{id}/viewers/{hash}` below `/v1/broadcasts/`.
+fn broadcast_route(method: &str, rest: &str, body: &[u8], relay: &Relay) -> Response {
+    let mut parts = rest.split('/');
+    let (id, viewers, hash, extra) = (parts.next(), parts.next(), parts.next(), parts.next());
+    if extra.is_some() || viewers.is_some_and(|v| v != "viewers") {
+        return Response::code(404, "not_found");
+    }
+    let Some(id) = id.and_then(BroadcastId::parse) else {
+        return Response::code(400, "bad_request");
+    };
+    match (method, viewers.is_some(), hash) {
+        ("DELETE", false, None) => {
+            relay.broadcasts.delete(id);
+            NO_CONTENT
+        }
+        ("POST", true, None) => {
+            let Some(viewer) = serde_json::from_slice::<ViewerRequest>(body)
+                .ok()
+                .and_then(|request| cert_hash(&request.viewer))
+            else {
+                return Response::code(400, "bad_request");
+            };
+            match relay.broadcasts.admit(id, viewer) {
+                Ok(token) => Response::json(
+                    201,
+                    json!({ "tok": token, "expires_in": relay.token_ttl_s() }),
+                ),
+                Err(AdmitError::UnknownBroadcast) => Response::code(404, "not_found"),
+                Err(AdmitError::Publisher) => Response::code(400, "bad_request"),
+                Err(AdmitError::BroadcastFull) => Response::code(409, "broadcast_full"),
+            }
+        }
+        ("DELETE", true, Some(hash)) => match cert_hash(hash) {
+            Some(hash) => {
+                relay.broadcasts.remove_viewer(id, &hash);
+                NO_CONTENT
+            }
+            None => Response::code(400, "bad_request"),
+        },
+        _ => Response::code(405, "method_not_allowed"),
     }
 }
 
@@ -354,6 +447,189 @@ mod tests {
         assert_eq!(body["fp"], "ab".repeat(32));
         assert_eq!(body["max_sessions"], 50);
         assert_eq!(body["uses"], json!(["images", "files", "screen_share"]));
+        assert_eq!(body["broadcast"], json!({ "max_viewers": 25 }));
+    }
+
+    fn relay_with(config: &str) -> Arc<Relay> {
+        let config = Config::parse(&format!("public_host = \"relay.test\"\n{config}")).unwrap();
+        let announced = Announced {
+            host: "relay.test".into(),
+            udp: 443,
+            tcp: 443,
+            fp: "ab".repeat(32),
+        };
+        Relay::new(&config, announced)
+    }
+
+    fn json_body(out: &str) -> serde_json::Value {
+        serde_json::from_str(out.split("\r\n\r\n").nth(1).unwrap()).unwrap()
+    }
+
+    fn create(publisher: &str, max_viewers: u32) -> String {
+        authed(
+            "POST",
+            "/v1/broadcasts",
+            &format!(r#"{{"publisher":"{publisher}","max_viewers":{max_viewers}}}"#),
+        )
+    }
+
+    fn admit(id: &str, viewer: &str) -> String {
+        authed(
+            "POST",
+            &format!("/v1/broadcasts/{id}/viewers"),
+            &format!(r#"{{"viewer":"{viewer}"}}"#),
+        )
+    }
+
+    #[tokio::test]
+    async fn status_has_no_broadcast_when_they_are_off() {
+        for config in [
+            "[uses]\nscreen_share = false",
+            "[limits]\nmax_broadcasts = 0",
+        ] {
+            let relay = relay_with(config);
+            let body = json_body(&request(&relay, &authed("GET", "/v1/status", "")).await);
+            assert!(body.get("broadcast").is_none(), "{config}: {body}");
+        }
+        let relay = relay_with("[limits]\nmax_viewers_per_broadcast = 9");
+        let body = json_body(&request(&relay, &authed("GET", "/v1/status", "")).await);
+        assert_eq!(body["broadcast"], json!({ "max_viewers": 9 }));
+    }
+
+    #[tokio::test]
+    async fn broadcast_lifecycle() {
+        let relay = relay_with("[limits]\nmax_viewers_per_broadcast = 1");
+        let (p, v, w) = ("A".repeat(40), "b".repeat(40), "c".repeat(40));
+        let out = request(&relay, &create(&p, 25)).await;
+        assert!(out.starts_with("HTTP/1.1 201 Created"), "{out}");
+        let body = json_body(&out);
+        let id = body["id"].as_str().unwrap().to_owned();
+        assert_eq!(id.len(), 16);
+        assert_eq!(body["tok"].as_str().unwrap().len(), 43);
+        assert_eq!(body["expires_in"], 120);
+        assert!(relay.allowed(&"a".repeat(40)));
+
+        let out = request(&relay, &admit(&id, &v)).await;
+        assert!(out.starts_with("HTTP/1.1 201"), "{out}");
+        let body = json_body(&out);
+        assert_eq!(body["tok"].as_str().unwrap().len(), 43);
+        assert_eq!(body["expires_in"], 120);
+        assert!(relay.allowed(&v));
+
+        let out = request(&relay, &admit(&id, &w)).await;
+        assert!(out.starts_with("HTTP/1.1 409 Conflict"), "{out}");
+        assert!(out.contains(r#""code":"broadcast_full""#), "{out}");
+        assert!(
+            request(&relay, &admit(&id, &p))
+                .await
+                .starts_with("HTTP/1.1 400")
+        );
+        assert!(
+            request(&relay, &admit(&id, "xyz"))
+                .await
+                .starts_with("HTTP/1.1 400")
+        );
+        let unknown = request(&relay, &admit("0000000000000001", &w)).await;
+        assert!(unknown.starts_with("HTTP/1.1 404"), "{unknown}");
+
+        let kick = authed("DELETE", &format!("/v1/broadcasts/{id}/viewers/{v}"), "");
+        assert!(request(&relay, &kick).await.starts_with("HTTP/1.1 204"));
+        assert!(!relay.allowed(&v));
+        assert!(
+            request(&relay, &admit(&id, &w))
+                .await
+                .starts_with("HTTP/1.1 201")
+        );
+
+        let end = authed("DELETE", &format!("/v1/broadcasts/{id}"), "");
+        assert!(request(&relay, &end).await.starts_with("HTTP/1.1 204"));
+        assert!(!relay.allowed(&w));
+        assert!(
+            request(&relay, &admit(&id, &w))
+                .await
+                .starts_with("HTTP/1.1 404")
+        );
+        // Deleting what is already gone is fine: the bot may race the relay's own end.
+        assert!(request(&relay, &end).await.starts_with("HTTP/1.1 204"));
+    }
+
+    #[tokio::test]
+    async fn broadcast_refusals() {
+        let p = "a".repeat(40);
+        let off = relay_with("[uses]\nscreen_share = false");
+        let out = request(&off, &create(&p, 25)).await;
+        assert!(out.starts_with("HTTP/1.1 403 Forbidden"), "{out}");
+        assert!(out.contains(r#""code":"use_not_allowed""#), "{out}");
+
+        let relay = relay_with("[limits]\nmax_broadcasts = 1");
+        assert!(
+            request(&relay, &create(&p, 25))
+                .await
+                .starts_with("HTTP/1.1 201")
+        );
+        let out = request(&relay, &create(&p, 25)).await;
+        assert!(out.starts_with("HTTP/1.1 503"), "{out}");
+        assert!(out.contains(r#""code":"relay_full""#), "{out}");
+        let none = relay_with("[limits]\nmax_broadcasts = 0");
+        assert!(
+            request(&none, &create(&p, 25))
+                .await
+                .starts_with("HTTP/1.1 503")
+        );
+
+        for bad in [create(&p, 0), create(&p, 70000), create("abc", 25)] {
+            assert!(
+                request(&relay, &bad).await.starts_with("HTTP/1.1 400"),
+                "{bad}"
+            );
+        }
+        for (method, path, status) in [
+            ("GET", "/v1/broadcasts", "405"),
+            ("GET", "/v1/broadcasts/0000000000000001", "405"),
+            ("POST", "/v1/broadcasts/0000000000000001", "405"),
+            ("DELETE", "/v1/broadcasts/0000000000000001/viewers", "405"),
+            ("DELETE", "/v1/broadcasts/xyz", "400"),
+            (
+                "DELETE",
+                "/v1/broadcasts/0000000000000001/viewers/xyz",
+                "400",
+            ),
+            ("DELETE", "/v1/broadcasts/0000000000000001/other", "404"),
+            (
+                "DELETE",
+                "/v1/broadcasts/0000000000000001/viewers/a/b",
+                "404",
+            ),
+        ] {
+            let out = request(&relay, &authed(method, path, "")).await;
+            assert!(
+                out.starts_with(&format!("HTTP/1.1 {status}")),
+                "{method} {path}: {out}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_peer_ends_its_broadcasts() {
+        let relay = relay();
+        let (p, v) = ("a".repeat(40), "b".repeat(40));
+        let id = json_body(&request(&relay, &create(&p, 25)).await)["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(
+            request(&relay, &admit(&id, &v))
+                .await
+                .starts_with("HTTP/1.1 201")
+        );
+        let out = request(&relay, &authed("DELETE", &format!("/v1/peers/{p}"), "")).await;
+        assert!(out.starts_with("HTTP/1.1 204"), "{out}");
+        assert!(!relay.allowed(&p) && !relay.allowed(&v));
+        assert!(
+            request(&relay, &admit(&id, &v))
+                .await
+                .starts_with("HTTP/1.1 404")
+        );
     }
 
     #[tokio::test]

@@ -20,6 +20,7 @@ use tokio::net::TcpStream;
 use tokio::sync::{oneshot, watch};
 use tokio::time::{sleep_until, timeout};
 
+use crate::broadcast::Registry;
 use crate::config::{Config, Limits, Uses};
 use crate::limits::{PairRate, SourceLimits, TokenBucket, lock, mbit_to_bytes};
 use crate::tcp::{self, FRAME_CONTROL, FRAME_PACKET, MAX_FRAME};
@@ -309,6 +310,8 @@ pub struct Relay {
     pub uses: Uses,
     pub sources: SourceLimits,
     pair_rate: PairRate,
+    /// Screen-share broadcasts; they don't count as sessions (spec 07 FR-7.46).
+    pub broadcasts: Registry,
     pairs: Mutex<HashMap<[u8; 32], Pair>>,
     bot_seen: Mutex<Option<Instant>>,
     total: Mutex<TokenBucket>,
@@ -323,6 +326,7 @@ impl Relay {
             boot_id: hex(&random::<8>()),
             sources: SourceLimits::new(&limits),
             pair_rate: PairRate::new(limits.pairs_per_min),
+            broadcasts: Registry::new(&limits),
             total: Mutex::new(TokenBucket::new(mbit_to_bytes(limits.total_mbit))),
             limits,
             uses: config.uses,
@@ -389,7 +393,8 @@ impl Relay {
         Ok(token)
     }
 
-    /// Removes `hash` from the allowlist: all its pairs are revoked and their sessions end.
+    /// Removes `hash` from the allowlist: all its pairs are revoked and their sessions end, its
+    /// broadcasts end, and it leaves every broadcast it watches.
     pub fn drop_peer(&self, hash: &str) {
         lock(&self.pairs).retain(|_, pair| {
             let has = pair.has(hash);
@@ -398,13 +403,14 @@ impl Relay {
             }
             !has
         });
+        self.broadcasts.drop_peer(hash);
     }
 
-    /// Whether `hash` is in a pair (the allowlist, FR-4.32). Recently expired pairs still count,
-    /// so a late client learns `expired` instead of `not_allowed`; such a pair grants nothing
-    /// else.
+    /// Whether `hash` is in a pair or a broadcast (the allowlist, FR-4.32). Recently expired
+    /// pairs still count, so a late client learns `expired` instead of `not_allowed`; such a pair
+    /// grants nothing else.
     pub fn allowed(&self, hash: &str) -> bool {
-        lock(&self.pairs).values().any(|pair| pair.has(hash))
+        lock(&self.pairs).values().any(|pair| pair.has(hash)) || self.broadcasts.allowed(hash)
     }
 
     fn bind(&self, token: &str, hash: &str) -> Result<Bind, Refusal> {
@@ -678,7 +684,8 @@ fn parse_bind(message: &[u8]) -> Result<String, Refusal> {
     }
 }
 
-/// Forgets long-expired pairs and idle rate-limit entries, and logs totals now and then.
+/// Forgets long-expired pairs, unused broadcasts and idle rate-limit entries, and logs totals now
+/// and then.
 pub async fn housekeeping(relay: Arc<Relay>) -> anyhow::Result<()> {
     let mut tick = tokio::time::interval(Duration::from_secs(10));
     let mut last_totals = Instant::now();
@@ -687,11 +694,13 @@ pub async fn housekeeping(relay: Arc<Relay>) -> anyhow::Result<()> {
         let now = Instant::now();
         lock(&relay.pairs)
             .retain(|_, pair| !pair.expired(now) || now < pair.expires_at + EXPIRED_KEPT);
+        relay.broadcasts.sweep(now);
         relay.sources.sweep();
         if last_totals.elapsed() >= TOTALS_EVERY {
             last_totals = now;
             tracing::info!(
                 sessions = relay.sessions(),
+                broadcasts = relay.broadcasts.count(),
                 bytes = relay.bytes_total.load(Ordering::Relaxed),
                 "totals"
             );
@@ -771,6 +780,20 @@ mod tests {
         relay.drop_peer(B);
         assert_eq!(refusal(relay.bind(&new, A)), Refusal::UnknownToken);
         assert!(!relay.allowed(A));
+    }
+
+    #[test]
+    fn broadcasts_join_the_allowlist_and_leave_with_drop_peer() {
+        let relay = relay("max_sessions = 1\nmax_sessions_per_peer = 1");
+        let ab = relay.create_pair(A.into(), B.into()).ok().unwrap();
+        assert!(relay.bind(&ab, A).is_ok());
+        // A full relay and a busy peer still get broadcasts (spec 07 FR-7.46).
+        let (id, _) = relay.broadcasts.create(A.into(), 25).unwrap();
+        relay.broadcasts.admit(id, C.into()).unwrap();
+        assert!(relay.allowed(C));
+        relay.drop_peer(A);
+        assert!(!relay.allowed(A) && !relay.allowed(C));
+        assert_eq!(relay.broadcasts.count(), 0);
     }
 
     #[test]

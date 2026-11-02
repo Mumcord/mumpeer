@@ -22,6 +22,10 @@ All notable changes to mumpeer are listed here. The format follows
 - `[uses]` config section to allow or disallow images, files and screen sharing on the relay.
   `GET /v1/status` lists the allowed `uses`, and `POST /v1/pairs` takes an optional `use` and
   answers `403 use_not_allowed` for a disabled one.
+- Screen-share broadcasts API for the relay bot: `POST /v1/broadcasts`, viewer admission and
+  removal, and `DELETE /v1/broadcasts/{id}`. New limits `max_broadcasts`,
+  `max_viewers_per_broadcast`, `broadcast_in_mbit` and `broadcast_out_mbit`; `GET /v1/status`
+  announces `broadcast.max_viewers` when broadcasts are available.
 - Minimal logging: no full IP addresses, certificate hashes, tokens or secrets.
 - Docker image and a local test environment (`testenv/`) with network namespace profiles.
 - Logo, README and documentation: operator guide, configuration reference, bot API reference,

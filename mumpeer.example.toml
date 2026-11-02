@@ -35,3 +35,7 @@ max_session_s = 0           # 0 = unlimited
 conn_per_ip_per_min = 20
 failed_per_ip_per_min = 10  # then the address is blocked for 10 minutes
 pairs_per_min = 120
+max_broadcasts = 4          # screen-share broadcasts at the same time; 0 = off
+max_viewers_per_broadcast = 25
+broadcast_in_mbit = 15      # publisher upload per broadcast
+broadcast_out_mbit = 300    # all copies of one broadcast; counted against total_mbit
