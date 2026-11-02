@@ -49,12 +49,13 @@ Errors carry a JSON body with a machine-readable code:
 | 400 | `bad_request` | Malformed request, JSON or certificate hash |
 | 401 | `unauthorized` | Missing or wrong secret |
 | 403 | `use_not_allowed` | The requested `use` is disabled in `[uses]` (or no `use` was sent while one is disabled) |
-| 404 | `not_found` | Unknown path |
+| 404 | `not_found` | Unknown path or unknown broadcast |
 | 405 | `method_not_allowed` | Known path, wrong method |
+| 409 | `broadcast_full` | The broadcast has as many viewers as it allows |
 | 413 | `too_large` | Body over 4 KiB |
 | 429 | `rate_limited` | More than `pairs_per_min` pairs this minute |
 | 431 | `too_large` | Request head over 8 KiB |
-| 503 | `relay_full` | `max_sessions` reached |
+| 503 | `relay_full` | `max_sessions` reached (pairs) or `max_broadcasts` reached (broadcasts) |
 
 ## `GET /v1/status`
 
@@ -76,7 +77,8 @@ curl -fsS -H "Authorization: Bearer $SECRET" http://127.0.0.1:7480/v1/status
   "fp": "0b355b90b32dae6e5fe93b59215ab74449e26a695328b27b861cba4f90c16ad5",
   "sessions": 0,
   "max_sessions": 50,
-  "uses": ["images", "files", "screen_share"]
+  "uses": ["images", "files", "screen_share"],
+  "broadcast": {"max_viewers": 25}
 }
 ```
 
@@ -90,6 +92,7 @@ curl -fsS -H "Authorization: Bearer $SECRET" http://127.0.0.1:7480/v1/status
 | `sessions` | Pairs with at least one connected side |
 | `max_sessions` | The configured limit |
 | `uses` | The features allowed to use this relay (`[uses]` in the config), any of `images`, `files`, `screen_share`. The bot announces them to clients. |
+| `broadcast` | Present only when screen-share broadcasts are available (`screen_share` allowed and `max_broadcasts` above 0). `max_viewers` is `max_viewers_per_broadcast`; the bot announces it to clients as `bc`. |
 
 ## `POST /v1/pairs`
 
@@ -132,7 +135,7 @@ Rules:
 ## `DELETE /v1/peers/{hash}`
 
 Removes a certificate from the allowlist: all its pairs are revoked and their sessions end
-(log reason `revoked`). The bot calls it when a user leaves the Mumble server or changes
+(log reason `revoked`), and it is removed from every [broadcast](#broadcasts). The bot calls it when a user leaves the Mumble server or changes
 certificate.
 
 ```sh
@@ -142,3 +145,78 @@ curl -fsS -X DELETE -H "Authorization: Bearer $SECRET" \
 
 `204 No Content`, also when the hash was in no pair. `400 bad_request` if `{hash}` is not 40
 hex characters.
+
+## Broadcasts
+
+A broadcast lets one sharer upload a screen share once; the relay copies it to every admitted
+viewer. The bot creates the broadcast for the sharer, then admits each viewer the sharer
+accepts. Every side gets its own token and connects with it like a pair side. Broadcasts live
+in memory only and don't count against `max_sessions` or `max_sessions_per_peer`.
+
+Broadcast ids are 16 hex characters (any case in paths; answered lowercase). Certificate hashes
+follow the same rules as for pairs.
+
+### `POST /v1/broadcasts`
+
+Creates a broadcast for the sharer.
+
+```sh
+curl -fsS -H "Authorization: Bearer $SECRET" -H 'Content-Type: application/json' \
+  -d '{"publisher":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","max_viewers":25}' \
+  http://127.0.0.1:7480/v1/broadcasts
+```
+
+Body:
+
+| Field | Meaning |
+| --- | --- |
+| `publisher` | Mumble certificate hash of the sharer |
+| `max_viewers` | Viewers the sharer wants, 1–65535. The relay caps it at `max_viewers_per_broadcast`. |
+
+`201 Created`:
+
+```json
+{"id":"3f9c2a7e10b4d685","tok":"Xq3…43 characters…","expires_in":120}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `id` | The broadcast id |
+| `tok` | The sharer's token (format as for pairs) |
+| `expires_in` | Seconds the sharer has to connect (`token_ttl_s`). A broadcast whose sharer never connects is forgotten after that. |
+
+Errors: `400 bad_request` (malformed hash, `max_viewers` 0 or too big), `403 use_not_allowed`
+(`screen_share` is disabled), `503 relay_full` (`max_broadcasts` broadcasts exist, or
+`max_broadcasts` is 0).
+
+### `POST /v1/broadcasts/{id}/viewers`
+
+Admits a viewer and returns the viewer's token.
+
+```sh
+curl -fsS -H "Authorization: Bearer $SECRET" -H 'Content-Type: application/json' \
+  -d '{"viewer":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}' \
+  http://127.0.0.1:7480/v1/broadcasts/3f9c2a7e10b4d685/viewers
+```
+
+`201 Created`: `{"tok":"…","expires_in":120}`.
+
+Rules:
+
+- Admitting the same viewer again replaces its token; its earlier connection ends.
+- A viewer token that runs out before the viewer connects frees its seat.
+- Errors: `400 bad_request` (malformed id or hash, or the viewer is the sharer),
+  `404 not_found` (unknown broadcast), `409 broadcast_full`.
+
+### `DELETE /v1/broadcasts/{id}/viewers/{hash}`
+
+Removes a viewer: its token stops working and its connection ends; the relay tells the sharer
+that the viewer left. `204 No Content`, also when the broadcast or viewer is unknown.
+
+### `DELETE /v1/broadcasts/{id}`
+
+Ends a broadcast: all tokens stop working and every connection of it is closed.
+`204 No Content`, also when the broadcast is already gone (the relay may have ended it first).
+
+`DELETE /v1/peers/{hash}` also removes the hash from every broadcast: a broadcast it shares
+ends, and it leaves every broadcast it watches.

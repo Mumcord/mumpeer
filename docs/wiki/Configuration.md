@@ -40,6 +40,10 @@ max_session_s = 0           # 0 = unlimited
 conn_per_ip_per_min = 20    # new connections per source address
 failed_per_ip_per_min = 10  # then the address is blocked for 10 minutes
 pairs_per_min = 120         # pairs the bot may create
+max_broadcasts = 4          # screen-share broadcasts at once; 0 = off
+max_viewers_per_broadcast = 25
+broadcast_in_mbit = 15      # sharer upload per broadcast
+broadcast_out_mbit = 300    # all copies of one broadcast; counts against total_mbit
 ```
 
 IPv6 sources are counted per /64. Set `total_mbit` below your uplink.

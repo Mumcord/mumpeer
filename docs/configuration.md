@@ -84,7 +84,7 @@ clients, and the API refuses pairs for a disabled use with `403 use_not_allowed`
 
 ## `[limits]`
 
-All limits are optional. Every value must be greater than 0, except `max_session_s`.
+All limits are optional. Every value must be greater than 0, except `max_session_s` and `max_broadcasts`.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
@@ -98,6 +98,10 @@ All limits are optional. Every value must be greater than 0, except `max_session
 | `conn_per_ip_per_min` | `20` | New relay connections per source address per minute. Further ones are refused for the rest of the minute. |
 | `failed_per_ip_per_min` | `10` | Failed handshakes, refused binds or failed API logins per source address per minute. Above it the address is blocked for 10 minutes, for the relay and the API. |
 | `pairs_per_min` | `120` | Pairs the bot may create per minute (`429 rate_limited` above). |
+| `max_broadcasts` | `4` | Screen-share broadcasts at the same time (one upload from the sharer, copied by the relay to every viewer). Above it, `POST /v1/broadcasts` answers `503 relay_full`. `0` turns broadcasts off; `GET /v1/status` then has no `broadcast` field. Broadcasts don't count against `max_sessions` or `max_sessions_per_peer`. |
+| `max_viewers_per_broadcast` | `25` | Viewers per broadcast. The bot announces it to clients; a broadcast never gets more viewers, even if the bot asks for more. At most 65535. |
+| `broadcast_in_mbit` | `15` | Upload of the sharer per broadcast, in Mbit/s. |
+| `broadcast_out_mbit` | `300` | All copies of one broadcast together, in Mbit/s. Also counted against `total_mbit`. |
 
 IPv6 sources are counted per /64 network, because one host can use a whole /64.
 
@@ -159,4 +163,8 @@ max_session_s = 0
 conn_per_ip_per_min = 20
 failed_per_ip_per_min = 10
 pairs_per_min = 120
+max_broadcasts = 4
+max_viewers_per_broadcast = 25
+broadcast_in_mbit = 15
+broadcast_out_mbit = 300
 ```

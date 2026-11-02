@@ -103,6 +103,14 @@ pub struct Limits {
     pub conn_per_ip_per_min: u32,
     pub failed_per_ip_per_min: u32,
     pub pairs_per_min: u32,
+    /// 0 turns screen-share broadcasts off.
+    pub max_broadcasts: u32,
+    /// Announced to clients as `bc`, a u16 on the wire.
+    pub max_viewers_per_broadcast: u32,
+    /// The publisher's upload of one broadcast.
+    pub broadcast_in_mbit: u32,
+    /// All copies of one broadcast together; also counted against `total_mbit`.
+    pub broadcast_out_mbit: u32,
 }
 
 impl Default for Limits {
@@ -118,6 +126,10 @@ impl Default for Limits {
             conn_per_ip_per_min: 20,
             failed_per_ip_per_min: 10,
             pairs_per_min: 120,
+            max_broadcasts: 4,
+            max_viewers_per_broadcast: 25,
+            broadcast_in_mbit: 15,
+            broadcast_out_mbit: 300,
         }
     }
 }
@@ -165,6 +177,9 @@ impl Config {
             ("conn_per_ip_per_min", l.conn_per_ip_per_min),
             ("failed_per_ip_per_min", l.failed_per_ip_per_min),
             ("pairs_per_min", l.pairs_per_min),
+            ("max_viewers_per_broadcast", l.max_viewers_per_broadcast),
+            ("broadcast_in_mbit", l.broadcast_in_mbit),
+            ("broadcast_out_mbit", l.broadcast_out_mbit),
         ];
         for (name, value) in must_be_positive {
             if value == 0 {
@@ -174,6 +189,13 @@ impl Config {
         // Clients reject a `ttl` outside u16 (spec §6.4).
         if l.token_ttl_s > u32::from(u16::MAX) {
             bail!("limits.token_ttl_s must be at most {}", u16::MAX);
+        }
+        // Announced to clients as the u16 `bc` (spec 07 §6.6).
+        if l.max_viewers_per_broadcast > u32::from(u16::MAX) {
+            bail!(
+                "limits.max_viewers_per_broadcast must be at most {}",
+                u16::MAX
+            );
         }
         Ok(())
     }
@@ -274,6 +296,15 @@ mod tests {
             ),
             (20, 10, 120)
         );
+        assert_eq!(
+            (
+                l.max_broadcasts,
+                l.max_viewers_per_broadcast,
+                l.broadcast_in_mbit,
+                l.broadcast_out_mbit
+            ),
+            (4, 25, 15, 300)
+        );
     }
 
     #[test]
@@ -292,6 +323,14 @@ mod tests {
         assert!(Config::parse("public_host = \"a.example\"\n[limits]\nmax_sessions = 0").is_err());
         assert!(Config::parse("public_host = \"a.example\"\ncert_file = \"c.pem\"").is_err());
         assert!(Config::parse(r#"public_host = "127.0.0.1""#).is_ok());
+        let limit =
+            |line: &str| Config::parse(&format!("public_host = \"a.example\"\n[limits]\n{line}"));
+        assert!(limit("max_broadcasts = 0").is_ok());
+        assert!(limit("max_viewers_per_broadcast = 0").is_err());
+        assert!(limit("max_viewers_per_broadcast = 65536").is_err());
+        assert!(limit("max_viewers_per_broadcast = 65535").is_ok());
+        assert!(limit("broadcast_in_mbit = 0").is_err());
+        assert!(limit("broadcast_out_mbit = 0").is_err());
     }
 
     #[test]
