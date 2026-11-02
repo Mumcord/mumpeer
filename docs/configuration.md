@@ -70,6 +70,18 @@ openssl rand -hex 32
 The bot needs the same value (`MUMBOT_PEER_API_SECRET` or its own `api_secret_file`, see
 [mumbot's peer documentation](https://github.com/Mumcord/mumbot/blob/main/docs/peer.md)).
 
+## `[uses]`
+
+Choose which Mumcord features may use the relay. All keys are optional booleans and default to
+`true`, so a config without this section relays everything. The enabled uses are announced to
+clients, and the API refuses pairs for a disabled use with `403 use_not_allowed`.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `images` | `true` | Full-size image transfers |
+| `files` | `true` | File transfers |
+| `screen_share` | `true` | Screen sharing |
+
 ## `[limits]`
 
 All limits are optional. Every value must be greater than 0, except `max_session_s`.
