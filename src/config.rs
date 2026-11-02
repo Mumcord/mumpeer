@@ -37,6 +37,54 @@ pub struct Config {
     pub key_file: Option<PathBuf>,
     #[serde(default)]
     pub limits: Limits,
+    #[serde(default)]
+    pub uses: Uses,
+}
+
+/// Which Mumcord features may use this relay. A missing key means allowed, so existing configs
+/// keep relaying everything.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct Uses {
+    pub images: bool,
+    pub files: bool,
+    pub screen_share: bool,
+}
+
+impl Default for Uses {
+    fn default() -> Self {
+        Self {
+            images: true,
+            files: true,
+            screen_share: true,
+        }
+    }
+}
+
+impl Uses {
+    pub const NAMES: [&'static str; 3] = ["images", "files", "screen_share"];
+
+    /// The enabled uses by their API names, in a fixed order.
+    pub fn enabled(&self) -> Vec<&'static str> {
+        Self::NAMES
+            .into_iter()
+            .filter(|name| self.allows(name))
+            .collect()
+    }
+
+    /// `false` for a disabled or unknown name.
+    pub fn allows(&self, name: &str) -> bool {
+        match name {
+            "images" => self.images,
+            "files" => self.files,
+            "screen_share" => self.screen_share,
+            _ => false,
+        }
+    }
+
+    pub fn all(&self) -> bool {
+        self.images && self.files && self.screen_share
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -244,6 +292,17 @@ mod tests {
         assert!(Config::parse("public_host = \"a.example\"\n[limits]\nmax_sessions = 0").is_err());
         assert!(Config::parse("public_host = \"a.example\"\ncert_file = \"c.pem\"").is_err());
         assert!(Config::parse(r#"public_host = "127.0.0.1""#).is_ok());
+    }
+
+    #[test]
+    fn uses_default_to_all_and_can_be_disabled() {
+        let config = Config::parse(MINIMAL).unwrap();
+        assert_eq!(config.uses.enabled(), ["images", "files", "screen_share"]);
+        let config = Config::parse("public_host = \"a.example\"\n[uses]\nfiles = false").unwrap();
+        assert_eq!(config.uses.enabled(), ["images", "screen_share"]);
+        assert!(!config.uses.all());
+        assert!(Config::parse("public_host = \"a.example\"\n[uses]\nvideo = true").is_err());
+        assert!(Config::parse("public_host = \"a.example\"\n[uses]\nfiles = 1").is_err());
     }
 
     #[test]

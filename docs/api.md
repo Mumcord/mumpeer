@@ -48,6 +48,7 @@ Errors carry a JSON body with a machine-readable code:
 | --- | --- | --- |
 | 400 | `bad_request` | Malformed request, JSON or certificate hash |
 | 401 | `unauthorized` | Missing or wrong secret |
+| 403 | `use_not_allowed` | The requested `use` is disabled in `[uses]` (or no `use` was sent while one is disabled) |
 | 404 | `not_found` | Unknown path |
 | 405 | `method_not_allowed` | Known path, wrong method |
 | 413 | `too_large` | Body over 4 KiB |
@@ -74,7 +75,8 @@ curl -fsS -H "Authorization: Bearer $SECRET" http://127.0.0.1:7480/v1/status
   "tcp": 443,
   "fp": "0b355b90b32dae6e5fe93b59215ab74449e26a695328b27b861cba4f90c16ad5",
   "sessions": 0,
-  "max_sessions": 50
+  "max_sessions": 50,
+  "uses": ["images", "files", "screen_share"]
 }
 ```
 
@@ -87,6 +89,7 @@ curl -fsS -H "Authorization: Bearer $SECRET" http://127.0.0.1:7480/v1/status
 | `fp` | SHA-256 of the relay certificate (DER), 64 lowercase hex characters: what clients pin |
 | `sessions` | Pairs with at least one connected side |
 | `max_sessions` | The configured limit |
+| `uses` | The features allowed to use this relay (`[uses]` in the config), any of `images`, `files`, `screen_share`. The bot announces them to clients. |
 
 ## `POST /v1/pairs`
 
@@ -104,6 +107,7 @@ Body:
 | Field | Meaning |
 | --- | --- |
 | `a`, `b` | Mumble certificate hashes of the two users: SHA-1 of the certificate DER, 40 hex characters (any case; stored lowercase). Must differ. |
+| `use` | Optional. What the pair is for: `images`, `files` or `screen_share`. A disabled use is refused with `403 use_not_allowed`. Without `use` the pair is only created when all three uses are enabled. Any other value is `400 bad_request`. |
 
 `201 Created`:
 

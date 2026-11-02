@@ -14,6 +14,7 @@ use tokio::time::timeout;
 use tokio_rustls::TlsAcceptor;
 
 use crate::config::ApiSecret;
+use crate::config::Uses;
 use crate::limits::log_prefix;
 use crate::relay::{PairError, Relay};
 
@@ -224,6 +225,9 @@ async fn read_head<S: AsyncRead + Unpin>(
 struct PairRequest {
     a: String,
     b: String,
+    /// What the pair is for: `images`, `files` or `screen_share`.
+    #[serde(default)]
+    r#use: Option<String>,
 }
 
 fn route(head: &Head, body: &[u8], relay: &Relay) -> Response {
@@ -240,6 +244,7 @@ fn route(head: &Head, body: &[u8], relay: &Relay) -> Response {
                 "fp": relay.announced.fp,
                 "sessions": relay.sessions(),
                 "max_sessions": relay.max_sessions(),
+                "uses": relay.uses.enabled(),
             }),
         ),
         ("POST", "/v1/pairs") => {
@@ -251,6 +256,17 @@ fn route(head: &Head, body: &[u8], relay: &Relay) -> Response {
             };
             if a == b {
                 return Response::code(400, "bad_request");
+            }
+            // Without `use` the pair could serve any feature, so it is only allowed when all are.
+            let allowed = match request.r#use.as_deref() {
+                Some(name) if !Uses::NAMES.contains(&name) => {
+                    return Response::code(400, "bad_request");
+                }
+                Some(name) => relay.uses.allows(name),
+                None => relay.uses.all(),
+            };
+            if !allowed {
+                return Response::code(403, "use_not_allowed");
             }
             match relay.create_pair(a, b) {
                 Ok(token) => Response::json(
@@ -337,6 +353,58 @@ mod tests {
         assert_eq!(body["boot_id"].as_str().unwrap().len(), 16);
         assert_eq!(body["fp"], "ab".repeat(32));
         assert_eq!(body["max_sessions"], 50);
+        assert_eq!(body["uses"], json!(["images", "files", "screen_share"]));
+    }
+
+    #[tokio::test]
+    async fn disabled_uses_are_refused_for_pairs() {
+        let config = Config::parse("public_host = \"relay.test\"\n[uses]\nfiles = false").unwrap();
+        let announced = Announced {
+            host: "relay.test".into(),
+            udp: 443,
+            tcp: 443,
+            fp: "ab".repeat(32),
+        };
+        let relay = Relay::new(&config, announced);
+        let a = "a".repeat(40);
+        let b = "b".repeat(40);
+        let pair = |extra: &str| {
+            authed(
+                "POST",
+                "/v1/pairs",
+                &format!(r#"{{"a":"{a}","b":"{b}"{extra}}}"#),
+            )
+        };
+
+        let out = request(&relay, &authed("GET", "/v1/status", "")).await;
+        let body: serde_json::Value =
+            serde_json::from_str(out.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(body["uses"], json!(["images", "screen_share"]));
+
+        for (extra, status) in [
+            (r#","use":"images""#, "201"),
+            (r#","use":"screen_share""#, "201"),
+            (r#","use":"files""#, "403"),
+            ("", "403"),
+            (r#","use":"video""#, "400"),
+        ] {
+            let out = request(&relay, &pair(extra)).await;
+            assert!(
+                out.starts_with(&format!("HTTP/1.1 {status}")),
+                "{extra}: {out}"
+            );
+            if status == "403" {
+                assert!(out.contains(r#""code":"use_not_allowed""#), "{out}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn pairs_without_use_work_when_all_uses_are_enabled() {
+        let relay = relay();
+        let body = format!(r#"{{"a":"{}","b":"{}"}}"#, "a".repeat(40), "b".repeat(40));
+        let out = request(&relay, &authed("POST", "/v1/pairs", &body)).await;
+        assert!(out.starts_with("HTTP/1.1 201"), "{out}");
     }
 
     #[tokio::test]

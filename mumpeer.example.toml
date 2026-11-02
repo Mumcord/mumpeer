@@ -18,6 +18,12 @@ api_secret_file = "/run/secrets/mumpeer_api_secret"
 # cert_file = "/etc/mumpeer/cert.pem"
 # key_file = "/etc/mumpeer/key.pem"
 
+# Which Mumcord features may use this relay (all default to true).
+[uses]
+images = true
+files = true
+screen_share = true
+
 [limits]
 session_mbit = 10           # bandwidth per session and direction
 total_mbit = 200            # bandwidth of all sessions together
