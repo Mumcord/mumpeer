@@ -46,6 +46,7 @@ IP addresses, full certificate hashes, tokens, the secret, packet contents.
   secrets get the caller's address blocked.
   The response includes `uses`, the enabled features from `[uses]`, and `broadcast` with
   `max_viewers`. `broadcast` is absent when screen sharing is off or `max_broadcasts = 0`.
+  `plugin_data` (with `max_kbps_per_sender`) is present only when `[uses] plugin_data = true`.
 - Load: `totals` and `dropped` in the log.
 
 ## Broadcasts

@@ -77,8 +77,9 @@ curl -fsS -H "Authorization: Bearer $SECRET" http://127.0.0.1:7480/v1/status
   "fp": "0b355b90b32dae6e5fe93b59215ab74449e26a695328b27b861cba4f90c16ad5",
   "sessions": 0,
   "max_sessions": 50,
-  "uses": ["images", "files", "screen_share"],
-  "broadcast": {"max_viewers": 25}
+  "uses": ["images", "files", "screen_share", "plugin_data"],
+  "broadcast": {"max_viewers": 25},
+  "plugin_data": {"max_kbps_per_sender": 512}
 }
 ```
 
@@ -91,7 +92,8 @@ curl -fsS -H "Authorization: Bearer $SECRET" http://127.0.0.1:7480/v1/status
 | `fp` | SHA-256 of the relay certificate (DER), 64 lowercase hex characters: what clients pin |
 | `sessions` | Pairs with at least one connected side |
 | `max_sessions` | The configured limit |
-| `uses` | The features allowed to use this relay (`[uses]` in the config), any of `images`, `files`, `screen_share`. The bot announces them to clients. |
+| `uses` | The features allowed to use this relay (`[uses]` in the config), any of `images`, `files`, `screen_share`, `plugin_data` (the last one only when the operator turned it on). The bot announces them to clients. |
+| `plugin_data` | Present only when `plugin_data` is in `uses`. `max_kbps_per_sender` is the per-sender limit (`[plugin_data]` in the config); the bot announces it to clients. |
 | `broadcast` | Present only when screen-share broadcasts are available (`screen_share` allowed and `max_broadcasts` above 0). `max_viewers` is `max_viewers_per_broadcast`; the bot announces it to clients as `bc`. |
 
 ## `POST /v1/pairs`
@@ -110,7 +112,7 @@ Body:
 | Field | Meaning |
 | --- | --- |
 | `a`, `b` | Mumble certificate hashes of the two users: SHA-1 of the certificate DER, 40 hex characters (any case; stored lowercase). Must differ. |
-| `use` | Optional. What the pair is for: `images`, `files` or `screen_share`. A disabled use is refused with `403 use_not_allowed`. Without `use` the pair is only created when all three uses are enabled. Any other value is `400 bad_request`. |
+| `use` | Optional. What the pair is for: `images`, `files`, `screen_share` or `plugin_data`. A disabled use is refused with `403 use_not_allowed`. Without `use` the pair is only created when `images`, `files` and `screen_share` are enabled; such a pair never carries plugin data. Any other value is `400 bad_request`. |
 
 `201 Created`:
 
@@ -172,6 +174,7 @@ Body:
 | --- | --- |
 | `publisher` | Mumble certificate hash of the sharer |
 | `max_viewers` | Viewers the sharer wants, 1–65535. The relay caps it at `max_viewers_per_broadcast`. |
+| `use` | Optional. `screen_share` (default) or `plugin_data`. A disabled use is `403 use_not_allowed`, any other value `400 bad_request`. |
 
 `201 Created`:
 
@@ -186,7 +189,7 @@ Body:
 | `expires_in` | Seconds the sharer has to connect (`token_ttl_s`). A broadcast whose sharer never connects is forgotten after that. |
 
 Errors: `400 bad_request` (malformed hash, `max_viewers` 0 or too big), `403 use_not_allowed`
-(`screen_share` is disabled), `503 relay_full` (`max_broadcasts` broadcasts exist, or
+(the requested `use` is disabled), `503 relay_full` (`max_broadcasts` broadcasts exist, or
 `max_broadcasts` is 0).
 
 ### `POST /v1/broadcasts/{id}/viewers`

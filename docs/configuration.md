@@ -73,7 +73,7 @@ The bot needs the same value (`MUMBOT_PEER_API_SECRET` or its own `api_secret_fi
 ## `[uses]`
 
 Choose which Mumcord features may use the relay. All keys are optional booleans and default to
-`true`, so a config without this section relays everything. The enabled uses are announced to
+`true`, so a config without this section relays everything, except `plugin_data`, which stays off until you turn it on. The enabled uses are announced to
 clients, and the API refuses pairs for a disabled use with `403 use_not_allowed`.
 
 | Key | Default | Meaning |
@@ -81,6 +81,19 @@ clients, and the API refuses pairs for a disabled use with `403 use_not_allowed`
 | `images` | `true` | Full-size image transfers |
 | `files` | `true` | File transfers |
 | `screen_share` | `true` | Screen sharing |
+| `plugin_data` | `false` | Data of Mumcord plugins. **Off by default**; a missing key means off. |
+
+## `[plugin_data]`
+
+Limits for plugin data. Only used when `[uses] plugin_data = true`. Every value must be greater
+than 0.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `max_kbps_per_sender` | `512` | Sustained upload of one sender, in kbit/s. Announced to clients through the bot (`plugin_data.max_kbps_per_sender` in `GET /v1/status`). |
+| `max_broadcasts` | `16` | Plugin-data broadcasts at the same time. |
+| `max_share_percent` | `25` | Share of `limits.total_mbit` that plugin data may use, 1 to 100. |
+| `max_unit_bytes` | `65536` | Largest single data unit in bytes, at most 1048576. |
 
 ## `[limits]`
 

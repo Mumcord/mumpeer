@@ -228,7 +228,7 @@ async fn read_head<S: AsyncRead + Unpin>(
 struct PairRequest {
     a: String,
     b: String,
-    /// What the pair is for: `images`, `files` or `screen_share`.
+    /// What the pair is for: `images`, `files`, `screen_share` or `plugin_data`.
     #[serde(default)]
     r#use: Option<String>,
 }
@@ -237,6 +237,9 @@ struct PairRequest {
 struct BroadcastRequest {
     publisher: String,
     max_viewers: u16,
+    /// `screen_share` (default) or `plugin_data`.
+    #[serde(default)]
+    r#use: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -269,6 +272,10 @@ fn route(head: &Head, body: &[u8], relay: &Relay) -> Response {
                 && relay.uses.screen_share
             {
                 status["broadcast"] = json!({ "max_viewers": max_viewers });
+            }
+            if relay.uses.plugin_data {
+                status["plugin_data"] =
+                    json!({ "max_kbps_per_sender": relay.plugin_data.max_kbps_per_sender });
             }
             Response::json(200, status)
         }
@@ -333,7 +340,12 @@ fn create_broadcast(body: &[u8], relay: &Relay) -> Response {
     if request.max_viewers == 0 {
         return Response::code(400, "bad_request");
     }
-    if !relay.uses.screen_share {
+    let allowed = match request.r#use.as_deref() {
+        None | Some("screen_share") => relay.uses.screen_share,
+        Some("plugin_data") => relay.uses.plugin_data,
+        Some(_) => return Response::code(400, "bad_request"),
+    };
+    if !allowed {
         return Response::code(403, "use_not_allowed");
     }
     match relay.broadcasts.create(publisher, request.max_viewers) {
@@ -551,6 +563,58 @@ mod tests {
         );
         // Deleting what is already gone is fine: the bot may race the relay's own end.
         assert!(request(&relay, &end).await.starts_with("HTTP/1.1 204"));
+    }
+
+    #[tokio::test]
+    async fn plugin_data_is_off_by_default_and_opt_in() {
+        let a = "a".repeat(40);
+        let b = "b".repeat(40);
+        let pair = authed(
+            "POST",
+            "/v1/pairs",
+            &format!(r#"{{"a":"{a}","b":"{b}","use":"plugin_data"}}"#),
+        );
+        let create_pd = authed(
+            "POST",
+            "/v1/broadcasts",
+            &format!(r#"{{"publisher":"{a}","max_viewers":5,"use":"plugin_data"}}"#),
+        );
+
+        let off = relay_with("");
+        let status = json_body(&request(&off, &authed("GET", "/v1/status", "")).await);
+        assert_eq!(status["uses"], json!(["images", "files", "screen_share"]));
+        assert!(status.get("plugin_data").is_none());
+        for req in [&pair, &create_pd] {
+            let out = request(&off, req).await;
+            assert!(out.starts_with("HTTP/1.1 403"), "{out}");
+            assert!(out.contains(r#""code":"use_not_allowed""#), "{out}");
+        }
+
+        let on = relay_with("[uses]\nplugin_data = true\n[plugin_data]\nmax_kbps_per_sender = 256");
+        let status = json_body(&request(&on, &authed("GET", "/v1/status", "")).await);
+        assert_eq!(
+            status["uses"],
+            json!(["images", "files", "screen_share", "plugin_data"])
+        );
+        assert_eq!(status["plugin_data"], json!({ "max_kbps_per_sender": 256 }));
+        for req in [&pair, &create_pd] {
+            assert!(request(&on, req).await.starts_with("HTTP/1.1 201"));
+        }
+        // A pair without `use` still works and never serves plugin data.
+        let plain = authed("POST", "/v1/pairs", &format!(r#"{{"a":"{a}","b":"{b}"}}"#));
+        assert!(request(&on, &plain).await.starts_with("HTTP/1.1 201"));
+        let bad = authed(
+            "POST",
+            "/v1/broadcasts",
+            &format!(r#"{{"publisher":"{a}","max_viewers":5,"use":"video"}}"#),
+        );
+        assert!(request(&on, &bad).await.starts_with("HTTP/1.1 400"));
+        // Plugin data off, screen share on: screen-share broadcasts are unaffected.
+        assert!(
+            request(&off, &create(&a, 5))
+                .await
+                .starts_with("HTTP/1.1 201")
+        );
     }
 
     #[tokio::test]

@@ -21,7 +21,7 @@ use tokio::sync::{oneshot, watch};
 use tokio::time::{sleep_until, timeout};
 
 use crate::broadcast::{self, PublisherBind, Registry, ViewerBind};
-use crate::config::{Config, Limits, Uses};
+use crate::config::{Config, Limits, PluginData, Uses};
 use crate::limits::{PairRate, SourceLimits, TokenBucket, lock, mbit_to_bytes};
 use crate::tcp::{self, FRAME_CONTROL, FRAME_PACKET, MAX_FRAME};
 use crate::{base64url, hex, random, sha256};
@@ -314,6 +314,7 @@ pub struct Relay {
     pub boot_id: String,
     limits: Limits,
     pub uses: Uses,
+    pub plugin_data: PluginData,
     pub sources: SourceLimits,
     pair_rate: PairRate,
     /// Screen-share broadcasts; they don't count as sessions (spec 07 FR-7.46).
@@ -337,6 +338,7 @@ impl Relay {
             total: Mutex::new(TokenBucket::new(mbit_to_bytes(limits.total_mbit))),
             limits,
             uses: config.uses,
+            plugin_data: config.plugin_data,
             pairs: Mutex::new(HashMap::new()),
             bot_seen: Mutex::new(None),
             bytes_total: AtomicU64::new(0),
