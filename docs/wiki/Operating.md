@@ -44,7 +44,23 @@ IP addresses, full certificate hashes, tokens, the secret, packet contents.
 - Manual status: `curl -H "Authorization: Bearer $SECRET" http://127.0.0.1:7480/v1/status`.
   Do not poll it automatically: every authenticated call counts as bot activity, and wrong
   secrets get the caller's address blocked.
+  The response includes `uses`, the enabled features from `[uses]`, and `broadcast` with
+  `max_viewers`. `broadcast` is absent when screen sharing is off or `max_broadcasts = 0`.
 - Load: `totals` and `dropped` in the log.
+
+## Broadcasts
+
+A broadcast is one screen share that the relay copies to many viewers, so the sharer uploads
+only once. Your bot creates and manages them through the
+[bot API](https://github.com/Mumcord/mumpeer/blob/main/docs/api.md#broadcasts)
+(`/v1/broadcasts`); you only set the limits, see [[Configuration]].
+
+- They do not count against `max_sessions`; they have their own `max_broadcasts`. Watch
+  your uplink instead: each viewer is one more copy leaving your server.
+- When the bot removes a user (`DELETE /v1/peers/{hash}`), that user leaves every broadcast;
+  if they were the sharer, the broadcast ends.
+- Forwarding the video itself comes in a later release; for now the relay only keeps the
+  registry and limits.
 
 ## Upgrading
 

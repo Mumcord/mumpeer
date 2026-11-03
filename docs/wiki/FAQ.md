@@ -34,8 +34,9 @@ hashes, no tokens and no content.
 
 ## Can someone use my relay as a free proxy or VPN?
 
-No. The relay only forwards between the two sides of a pair that your bot created, for two
-users who are on your Mumble server at that moment. It never opens connections to anywhere
+No. The relay only forwards between the two sides of a pair that your bot created, or from the
+sharer of a broadcast to the viewers your bot admitted, for users who are on your Mumble server
+at that moment. It never opens connections to anywhere
 else.
 
 ## How is this different from a TURN server?
@@ -78,6 +79,9 @@ after the bot leaves the server.
 Each session may use up to `session_mbit` (default 10 Mbit/s) in each direction; all sessions
 together up to `total_mbit` (default 200). Set `total_mbit` below your uplink. A typical screen
 share uses a few Mbit/s.
+A broadcast (one screen share shown to many viewers) adds one copy per viewer on your outgoing
+side, up to `broadcast_out_mbit` (default 300) per broadcast, so check your uplink before you
+raise `max_viewers_per_broadcast`. See [[Configuration]].
 
 ## Can one relay serve several Mumble servers?
 

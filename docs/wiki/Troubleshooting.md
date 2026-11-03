@@ -26,6 +26,8 @@ The full table of start errors, symptoms and fixes: [troubleshooting](https://gi
 | `not_allowed` | Certificate not in the pair, or side already bound | User changed certificate or used a second device; retry |
 | `bot_gone` | No API call from the bot for 90 s | Restart or fix the bot |
 | `relay_full` / `peer_limit` | `max_sessions` / `max_sessions_per_peer` reached | Wait or raise the limit |
+| `relay_full` on broadcast creation | `max_broadcasts` reached (or `0`) | Wait for a broadcast to end or raise `max_broadcasts` |
+| Attach button or screen sharing disabled in Mumcord, with a reason | The matching switch in `[uses]` is `false`; the API answers `403 use_not_allowed` | Set it to `true` and restart mumpeer if you want the relay to carry that use |
 | Choppy screen share | Bandwidth limits drop packets (`dropped=` in the log) | Raise `session_mbit`/`total_mbit` if the uplink allows |
 | One user cannot connect for 10 minutes | Too many failed handshakes from their network | Wait; check the `blocked for 10 minutes` warning |
 
