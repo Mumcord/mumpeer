@@ -5,13 +5,15 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tokio::sync::watch;
 
+use super::session::{Session, Subscriber};
 use crate::config::Limits;
 use crate::limits::lock;
+use crate::relay::Refusal;
 use crate::{base64url, random, sha256};
 
 /// A broadcast id: a random u64, written as 16 lowercase hex digits (spec 07 §6.6).
@@ -44,6 +46,10 @@ pub enum BroadcastEnd {
     Revoked,
     /// The token ran out before its side connected.
     Expired,
+    /// The publisher closed its link (or, for a subscriber, the subscriber closed its own).
+    Closed,
+    /// The publisher sent nothing for `idle_timeout_s`.
+    Idle,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -60,12 +66,12 @@ pub enum AdmitError {
     BroadcastFull,
 }
 
-/// One admitted viewer. `bound` is set once its subscriber link is bound.
+/// One admitted viewer. `slot` is set once its subscriber link is bound.
 struct Viewer {
-    #[expect(dead_code, reason = "the subscriber bind (next step) looks tokens up")]
     token: [u8; 32],
     expires_at: Instant,
     bound: bool,
+    slot: Option<u16>,
     end: watch::Sender<Option<BroadcastEnd>>,
 }
 
@@ -82,13 +88,14 @@ impl Viewer {
 /// One broadcast. `publisher_bound` is set once the publisher link is bound.
 struct Broadcast {
     publisher: String,
-    #[expect(dead_code, reason = "the publisher bind (next step) looks tokens up")]
     publisher_token: [u8; 32],
     expires_at: Instant,
     publisher_bound: bool,
     max_viewers: u16,
     viewers: HashMap<String, Viewer>,
     end: watch::Sender<Option<BroadcastEnd>>,
+    session: Arc<Session>,
+    next_slot: u16,
 }
 
 impl Broadcast {
@@ -104,10 +111,28 @@ impl Broadcast {
     }
 }
 
+/// A bound publisher link: what it needs to run the broadcast.
+pub struct PublisherBind {
+    pub id: BroadcastId,
+    pub session: Arc<Session>,
+    pub end: watch::Receiver<Option<BroadcastEnd>>,
+}
+
+/// A bound subscriber link. `token` tells its own entry apart from a later re-admission.
+pub struct ViewerBind {
+    pub id: BroadcastId,
+    pub session: Arc<Session>,
+    pub subscriber: Arc<Subscriber>,
+    pub token: [u8; 32],
+    pub end: watch::Receiver<Option<BroadcastEnd>>,
+}
+
 pub struct Registry {
     max_broadcasts: usize,
     max_viewers: u16,
     token_ttl: Duration,
+    in_mbit: u32,
+    out_mbit: u32,
     broadcasts: Mutex<HashMap<BroadcastId, Broadcast>>,
 }
 
@@ -118,6 +143,8 @@ impl Registry {
             // The config validates the range; the fallback is never used.
             max_viewers: u16::try_from(limits.max_viewers_per_broadcast).unwrap_or(u16::MAX),
             token_ttl: Duration::from_secs(limits.token_ttl_s.into()),
+            in_mbit: limits.broadcast_in_mbit,
+            out_mbit: limits.broadcast_out_mbit,
             broadcasts: Mutex::new(HashMap::new()),
         }
     }
@@ -160,6 +187,8 @@ impl Registry {
                 max_viewers: max_viewers.min(self.max_viewers),
                 viewers: HashMap::new(),
                 end: watch::channel(None).0,
+                session: Arc::new(Session::new(self.in_mbit, self.out_mbit)),
+                next_slot: 0,
             },
         );
         Ok((id, token))
@@ -198,6 +227,7 @@ impl Registry {
                 token: sha256(token.as_bytes()),
                 expires_at: now + self.token_ttl,
                 bound: false,
+                slot: None,
                 end: watch::channel(None).0,
             },
         );
@@ -215,8 +245,86 @@ impl Registry {
 
     /// Ends a broadcast and all its viewers; an unknown id is ignored.
     pub fn delete(&self, id: BroadcastId) {
+        self.end(id, BroadcastEnd::Deleted);
+    }
+
+    /// Ends a broadcast for `reason`; an unknown id is ignored.
+    pub fn end(&self, id: BroadcastId, reason: BroadcastEnd) {
         if let Some(broadcast) = lock(&self.broadcasts).remove(&id) {
-            broadcast.end(BroadcastEnd::Deleted);
+            broadcast.end(reason);
+        }
+    }
+
+    /// Binds the publisher link of the broadcast with this token.
+    pub fn bind_publisher(&self, token: &str, hash: &str) -> Result<PublisherBind, Refusal> {
+        let key = sha256(token.as_bytes());
+        let mut broadcasts = lock(&self.broadcasts);
+        let (id, broadcast) = broadcasts
+            .iter_mut()
+            .find(|(_, b)| b.publisher_token == key)
+            .ok_or(Refusal::UnknownToken)?;
+        if broadcast.publisher != hash || broadcast.publisher_bound {
+            return Err(Refusal::NotAllowed);
+        }
+        if Instant::now() >= broadcast.expires_at {
+            return Err(Refusal::Expired);
+        }
+        broadcast.publisher_bound = true;
+        Ok(PublisherBind {
+            id: *id,
+            session: broadcast.session.clone(),
+            end: broadcast.end.subscribe(),
+        })
+    }
+
+    /// Binds a subscriber link and gives it a slot, unique within its broadcast.
+    pub fn bind_viewer(&self, token: &str, hash: &str) -> Result<ViewerBind, Refusal> {
+        let key = sha256(token.as_bytes());
+        let mut broadcasts = lock(&self.broadcasts);
+        let (id, broadcast) = broadcasts
+            .iter_mut()
+            .find(|(_, b)| b.viewers.values().any(|v| v.token == key))
+            .ok_or(Refusal::UnknownToken)?;
+        let viewer = broadcast
+            .viewers
+            .get(hash)
+            .filter(|v| v.token == key && !v.bound)
+            .ok_or(Refusal::NotAllowed)?;
+        if Instant::now() >= viewer.expires_at {
+            return Err(Refusal::Expired);
+        }
+        if broadcast.session.viewers() >= usize::from(broadcast.max_viewers) {
+            return Err(Refusal::BroadcastFull);
+        }
+        let slot = loop {
+            let slot = broadcast.next_slot;
+            broadcast.next_slot = slot.wrapping_add(1);
+            if !broadcast.viewers.values().any(|v| v.slot == Some(slot)) {
+                break slot;
+            }
+        };
+        let viewer = broadcast.viewers.get_mut(hash).ok_or(Refusal::NotAllowed)?;
+        viewer.bound = true;
+        viewer.slot = Some(slot);
+        Ok(ViewerBind {
+            id: *id,
+            session: broadcast.session.clone(),
+            subscriber: broadcast.session.add(slot),
+            token: key,
+            end: viewer.end.subscribe(),
+        })
+    }
+
+    /// A subscriber link ended: its seat is freed unless the bot admitted the viewer again
+    /// meanwhile (then the entry has a new token).
+    pub fn viewer_left(&self, id: BroadcastId, hash: &str, token: &[u8; 32]) {
+        if let Some(broadcast) = lock(&self.broadcasts).get_mut(&id)
+            && broadcast
+                .viewers
+                .get(hash)
+                .is_some_and(|v| v.token == *token)
+        {
+            broadcast.viewers.remove(hash);
         }
     }
 
@@ -439,5 +547,44 @@ mod tests {
         registry.sweep(Instant::now() + Duration::from_secs(121));
         assert!(registry.allowed(P) && registry.allowed(V));
         assert!(!registry.allowed(W));
+    }
+
+    #[test]
+    fn binds_give_unique_slots_and_survive_re_admission() {
+        let registry = registry("");
+        let (id, token) = registry.create(P.into(), 25).unwrap();
+        assert_eq!(
+            registry.bind_publisher(&token, V).err(),
+            Some(Refusal::NotAllowed)
+        );
+        assert!(registry.bind_publisher(&token, P).is_ok());
+        assert_eq!(
+            registry.bind_publisher(&token, P).err(),
+            Some(Refusal::NotAllowed)
+        );
+
+        let v_token = registry.admit(id, V.into()).unwrap();
+        let w_token = registry.admit(id, W.into()).unwrap();
+        let v = registry.bind_viewer(&v_token, V).unwrap();
+        let w = registry.bind_viewer(&w_token, W).unwrap();
+        assert_ne!(v.subscriber.slot, w.subscriber.slot);
+        assert_eq!(
+            registry.bind_viewer(&v_token, V).err(),
+            Some(Refusal::NotAllowed)
+        );
+        assert_eq!(
+            registry.bind_viewer(&"A".repeat(43), V).err(),
+            Some(Refusal::UnknownToken)
+        );
+
+        // The old link of a re-admitted viewer leaving must not free the new seat.
+        registry.admit(id, V.into()).unwrap();
+        registry.viewer_left(id, V, &v.token);
+        assert!(registry.allowed(V));
+        registry.viewer_left(id, W, &w.token);
+        assert!(!registry.allowed(W));
+        // Bound sides survive the sweep.
+        registry.sweep(Instant::now() + Duration::from_secs(121));
+        assert_eq!(registry.count(), 1);
     }
 }

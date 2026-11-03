@@ -160,6 +160,115 @@ Each session has a token bucket per direction (`session_mbit`) and all sessions 
 notices the loss and slows down by itself. Bursts of 100 ms worth of traffic (at least 64 KiB)
 pass, so a single video key frame is not cut.
 
+## Screen-share broadcasts
+
+A broadcast (Mumcord spec 07, FR-7.41 … FR-7.50) lets one sharer upload a screen share once;
+the relay copies it to every admitted viewer. The bot creates the broadcast and admits viewers
+through the [API](api.md#broadcasts); each side then opens its own outer link (QUIC or TCP, as
+above, same mutual TLS) and binds with its token and a role. The publisher's link and every
+subscriber's link are independent: there is no pairing and no `waiting` state.
+
+### Bind
+
+| Direction | Message |
+| --- | --- |
+| client → relay | `{"v":1,"t":"bind","tok":"<43 base64url>","role":"pub"}`: the sharer, with the token from `POST /v1/broadcasts` |
+| client → relay | `{"v":1,"t":"bind","tok":"<43 base64url>","role":"sub"}`: a viewer, with the token from `POST /v1/broadcasts/{id}/viewers` |
+| relay → client | `{"v":1,"t":"ready"}`: bound; units may flow |
+| relay → client | `{"v":1,"t":"error","code":"…"}`, then the relay closes the link |
+| relay → client | `{"v":1,"t":"end","reason":"…"}`, then the relay closes the link |
+
+A `bind` without `role` is a pair bind as before; any other `role` value is `bad_request`. Each
+token binds once. A subscriber gets nothing until the publisher's next keyframe, so it should
+send `keyreq` and `kf` right after `ready`.
+
+Besides the pair codes (`unknown_token`, `expired`, `not_allowed`, `bot_gone`, `version`,
+`bad_request`), a broadcast bind can be refused with:
+
+| Code | Meaning | Counts as a failed handshake? |
+| --- | --- | --- |
+| `use_not_allowed` | The relay does not allow screen sharing (`[uses] screen_share = false`) | no |
+| `broadcast_full` | The broadcast has all the subscribers it may have | no |
+| `not_allowed` | The certificate is not the one the token was issued for, or the token is already bound | yes |
+
+### Units
+
+After `ready`, everything on a broadcast link is a **unit**: a 14-byte clear header followed
+by its payload. The layout, the size limits and the test vectors are defined in Mumcord's
+`crates/p2p/README.md` (module `mumcord_p2p::broadcast`); mumpeer checks the same vectors.
+
+```text
+offset 0  version (1)          offset 5   key id (0 for control)
+offset 1  kind: 1 video,       offset 6   sequence, u32 BE (0 for control)
+          2 audio, 3 control   offset 10  payload size, u32 BE
+offset 2  flags: bit 0 keyframe (video only)
+offset 3  temporal layer 0–3 (video only)
+offset 4  video: codec 1 VP9, 2 AV1 · audio: 3 Opus ·
+          control: 1 keyreq, 2 key, 3 kf, 4 layers, 5 gone
+```
+
+Media payloads are end-to-end encrypted by the sharer and forwarded unchanged; the relay reads
+only the header. A unit with an invalid header (unknown version, kind, codec or control type,
+flags or layer out of range, a control unit with a key id or sequence, a size out of range)
+closes the link.
+
+How units travel:
+
+- **QUIC:** every unit on its **own unidirectional stream**: open, write header and payload,
+  finish. Readers take streams in the order they were opened, so units stay in order. A stream
+  carrying more or less than its header announces closes the link. A client may also send a
+  small control unit as **one QUIC datagram** (the whole unit, nothing else); the relay itself
+  always uses streams, so `key` and `keyreq` are never lost. The relay lets each client have up
+  to 64 unidirectional streams open; clients must allow the relay at least as many.
+- **TCP:** units form one byte stream, cut into consecutive `0x01` frames of at most 1500
+  bytes. A unit may start or end anywhere inside a frame; units are never interleaved. `0x00`
+  frames after `bind` are ignored.
+
+### Control flow
+
+| Type | Direction | Payload |
+| --- | --- | --- |
+| `keyreq` | sub → relay → pub | The subscriber sends an opaque body (≤ 1024 bytes); the publisher receives `slot ‖ body`, where `slot` is the subscriber's u16 (big-endian) |
+| `key` | pub → relay → one sub | The publisher sends `slot ‖ body` (body ≤ 1024 bytes); the subscriber in that slot receives `body`. An unknown slot is ignored |
+| `kf` | sub → relay → pub | Empty. Forwarded at most once per 2 s per subscriber and once per 500 ms per broadcast; the relay also sends one when a subscriber's queue overflows or an upload was over its limit |
+| `layers` | sub → relay | One byte: the highest temporal layer (0–3) this subscriber wants; higher layers are not sent to it |
+| `gone` | relay → pub | `slot` of a subscriber that left or was removed, so the publisher can rekey |
+
+A slot is unique within its broadcast while its subscriber is bound. A subscriber sending
+media closes its link; control types that are not its to send are ignored, as is a publisher
+sending `keyreq`, `kf`, `layers` or `gone`.
+
+### Pacing
+
+Every subscriber has its own small queue, so a slow one never holds up the others (the same
+policy as Mumcord's direct fan-out):
+
+- Control units go first, then audio (at most 25 waiting, oldest dropped), then video.
+- A video backlog of 3 frames costs the subscriber the highest temporal layer (at most one
+  layer per 500 ms); after 3 s of keeping up it gets one layer back.
+- At 8 waiting frames the queue is cleared, the subscriber drops to layer 0, gets nothing until
+  the next keyframe, and the relay asks the publisher for one.
+- Units the publisher sends above `broadcast_in_mbit` (or above `total_mbit`) are dropped;
+  subscribers then wait for the next keyframe, which the relay requests.
+- Copies to subscribers are paced by `broadcast_out_mbit` (all copies of one broadcast) and
+  `total_mbit`: a subscriber waits for its share, its queue grows, and it loses layers.
+  A unit larger than the burst (a big keyframe) is never cut.
+
+### End
+
+The relay ends a link with `end` and closes it (on QUIC with application code 0 and the reason
+as close reason). When the publisher's link ends, the whole broadcast ends.
+
+| Reason | Cause |
+| --- | --- |
+| `closed` | The publisher closed its link (sent to subscribers), or a subscriber closed or broke its own link |
+| `idle` | No unit from the publisher for `idle_timeout_s` (default 60 s) |
+| `deleted` | The bot deleted the broadcast, or removed this viewer |
+| `revoked` | The bot dropped the certificate hash (`DELETE /v1/peers/{hash}`), or admitted the viewer again with a new token |
+
+A subscriber that leaves frees its seat; the publisher gets `gone`. The relay logs only the
+broadcast id, the viewer count, bytes and the end reason, never payloads.
+
 ## Allowlist API
 
 The bot side of the protocol is documented in the [API reference](api.md).

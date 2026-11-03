@@ -52,6 +52,23 @@ impl TokenBucket {
     }
 }
 
+impl TokenBucket {
+    /// For whole broadcast units, which can be larger than the burst (a keyframe of several
+    /// MiB): a unit passes while the bucket is not empty and may leave it in debt. `Err` is the
+    /// time until the debt is paid off; the caller either waits that long or drops the unit.
+    pub fn spend(&mut self, bytes: usize, now: Instant) -> Result<(), Duration> {
+        let elapsed = now.saturating_duration_since(self.last).as_secs_f64();
+        self.last = now;
+        self.tokens = (self.tokens + elapsed * self.rate).min(self.capacity);
+        if self.tokens > 0.0 {
+            self.tokens -= bytes as f64;
+            Ok(())
+        } else {
+            Err(Duration::from_secs_f64(-self.tokens / self.rate + 0.001))
+        }
+    }
+}
+
 /// Counts events in fixed one-minute windows.
 #[derive(Clone, Copy)]
 struct Window {
@@ -236,6 +253,16 @@ mod tests {
         assert!(bucket.take(65_536, start));
         assert!(!bucket.take(1_000, start));
         assert!(bucket.take(1_000, start + Duration::from_millis(20)));
+    }
+
+    #[test]
+    fn spend_lets_big_units_pass_into_debt() {
+        let start = Instant::now();
+        let mut bucket = TokenBucket::new(100_000.0);
+        assert_eq!(bucket.spend(1_000_000, start), Ok(()));
+        let wait = bucket.spend(1, start).unwrap_err();
+        assert!(wait > Duration::from_secs(9) && wait < Duration::from_secs(10));
+        assert_eq!(bucket.spend(1, start + wait), Ok(()));
     }
 
     #[test]
