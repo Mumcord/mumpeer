@@ -2,6 +2,8 @@
 #   MUMPEER_PORT_BASE  Mumble server port; the relay uses base+1 (UDP and TCP), the API base+2 on
 #                      loopback (default 44758, away from a real server's 64738 and from the
 #                      Mumcord and Mumbot test servers)
+#   MUMPEER_PROFILE    relay config: all (default), no-files, no-screen, no-images, no-broadcast, old
+#   MUMPEER_IMAGE      run this existing mumpeer image instead of building the checkout
 #   MUMPEER_PROJECT    compose project name (default mumpeer-testenv); a non-default name also
 #                      gets its own data dir (data/_<name>, git-ignored)
 MUMPEER_PORT_BASE="${MUMPEER_PORT_BASE:-44758}"
@@ -10,6 +12,7 @@ export COMPOSE_PROJECT_NAME="$MUMPEER_PROJECT"
 export PORT_MUMBLE=$((MUMPEER_PORT_BASE))
 export PORT_RELAY=$((MUMPEER_PORT_BASE + 1))
 export PORT_API=$((MUMPEER_PORT_BASE + 2))
+export MUMPEER_PROFILE="${MUMPEER_PROFILE:-all}"
 export MUMBOT_IMAGE="${MUMBOT_IMAGE:-ghcr.io/mumcord/mumbot:latest}"
 if [ "$MUMPEER_PROJECT" = mumpeer-testenv ]; then DATA_ROOT=data; else DATA_ROOT="data/_$MUMPEER_PROJECT"; fi
 export DATA_ROOT

@@ -96,9 +96,8 @@ Things to know:
 - Size your uplink: one full broadcast at the defaults can send up to 300 Mbit/s out. Keep
   `total_mbit` below what your server can really send, and lower `broadcast_out_mbit` or
   `max_viewers_per_broadcast` if needed.
-- **Forwarding the video itself comes in a later release.** This version only manages
-  broadcasts and viewers (the bot API and the limits above); the relay does not copy video
-  yet.
+- The relay copies the sharer's video and audio to every admitted viewer. The stream stays
+  end-to-end encrypted, so the relay cannot read it.
 
 ## Environment
 

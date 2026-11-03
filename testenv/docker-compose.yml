@@ -24,7 +24,7 @@ services:
 
   mumpeer:
     build: ..
-    image: mumpeer:testenv
+    image: ${MUMPEER_IMAGE:-mumpeer:testenv}
     restart: "no"
     network_mode: host
     user: "${PUID:-1000}:${PGID:-1000}"
