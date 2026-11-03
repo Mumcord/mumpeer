@@ -74,7 +74,9 @@ flowchart LR
 4. The relay answers `ready` to both and from then on copies their packets to each other
    unchanged.
 
-Details: [wire and handshake overview](docs/protocol.md).
+Details: [wire and handshake overview](docs/protocol.md). Broadcasts work the same way, with
+one sharer and several viewers instead of a pair; see the
+[bot API](docs/api.md#broadcasts).
 
 ## Features
 
@@ -82,7 +84,15 @@ Details: [wire and handshake overview](docs/protocol.md).
   default to port 443, which almost every network allows. One side may use UDP while the other
   uses TCP.
 - **Not an open proxy:** the relay only forwards between the two sides of one pair the bot
-  created. It never opens a connection itself.
+  created, or from the sharer of a broadcast to the viewers the bot admitted. It never opens a
+  connection itself.
+- **Broadcasts:** one user shares their screen with up to 25 viewers (`max_viewers_per_broadcast`)
+  while uploading it only once; the relay makes the copies. Needs `screen_share` allowed and
+  `max_broadcasts` above 0. This release adds the bot API, registry and limits; forwarding the
+  video itself comes in a later release. See the
+  [wiki](https://github.com/Mumcord/mumpeer/wiki/Configuration#broadcasts).
+- **Allowed uses:** the `[uses]` switches (`images`, `files`, `screen_share`) let the operator
+  decide which kinds of traffic the relay carries; Mumcord shows disabled uses with a reason.
 - **Strong identity checks:** TLS 1.3 only, a client certificate is mandatory, and clients pin
   the relay's certificate by its SHA-256 fingerprint.
 - **Short-lived pair tokens:** 256-bit random, valid for 120 seconds by default, usable once
@@ -115,7 +125,8 @@ each other, and how much data flows and when. They cannot see the contents. Mumc
 users this before they use a relay. Pairs, sessions and counters live in memory only; the only
 files the relay writes are its own key and certificate.
 
-More: [Security & privacy](docs/wiki/Security-and-privacy.md).
+More: [Security & privacy](docs/wiki/Security-and-privacy.md). Operator guides for every topic are
+in the [wiki](https://github.com/Mumcord/mumpeer/wiki).
 
 ## Quick start
 
@@ -247,6 +258,10 @@ Defaults are sized for a 2-vCPU VPS with about 50 parallel screen shares:
 | `conn_per_ip_per_min` | 20 | New connections per source address and minute |
 | `failed_per_ip_per_min` | 10 | Failed handshakes or API logins per source address and minute; then blocked for 10 minutes |
 | `pairs_per_min` | 120 | Pairs the bot may create per minute |
+| `max_broadcasts` | 4 | Screen-share broadcasts at the same time, 0 = off |
+| `max_viewers_per_broadcast` | 25 | Viewers per broadcast |
+| `broadcast_in_mbit` | 15 | Sharer upload per broadcast |
+| `broadcast_out_mbit` | 300 | All copies of one broadcast; also counts against `total_mbit` |
 
 IPv6 sources are counted per /64. When the bot has not called the API for 90 seconds, new
 connections are refused with `bot_gone`, and running sessions end after 60 seconds without
