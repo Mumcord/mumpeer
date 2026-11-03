@@ -59,8 +59,8 @@ only once. Your bot creates and manages them through the
   your uplink instead: each viewer is one more copy leaving your server.
 - When the bot removes a user (`DELETE /v1/peers/{hash}`), that user leaves every broadcast;
   if they were the sharer, the broadcast ends.
-- Forwarding the video itself comes in a later release; for now the relay only keeps the
-  registry and limits.
+- The relay forwards the sharer's video and audio to the admitted viewers. The stream stays
+  end-to-end encrypted, so the relay cannot read it.
 
 ## Upgrading
 

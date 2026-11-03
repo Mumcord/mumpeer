@@ -88,8 +88,8 @@ one sharer and several viewers instead of a pair; see the
   connection itself.
 - **Broadcasts:** one user shares their screen with up to 25 viewers (`max_viewers_per_broadcast`)
   while uploading it only once; the relay makes the copies. Needs `screen_share` allowed and
-  `max_broadcasts` above 0. This release adds the bot API, registry and limits; forwarding the
-  video itself comes in a later release. See the
+  `max_broadcasts` above 0. The relay forwards the sharer's video and audio to the admitted
+  viewers without being able to read it. See the
   [wiki](https://github.com/Mumcord/mumpeer/wiki/Configuration#broadcasts).
 - **Allowed uses:** the `[uses]` switches (`images`, `files`, `screen_share`) let the operator
   decide which kinds of traffic the relay carries; Mumcord shows disabled uses with a reason.

@@ -25,8 +25,32 @@ addresses and the relay fingerprint.
 | mumpeer API | `http://127.0.0.1:44760` | secret in `testenv/.env` (`MUMPEER_API_SECRET`) |
 | relay bot | user `RelayBot` | `MUMBOT_IMAGE` (default `ghcr.io/mumcord/mumbot:latest`; until a release contains `mumbot peer`, build it from Mumcord/mumbot and set `MUMBOT_IMAGE`) |
 
+## Profiles
+
+`MUMPEER_PROFILE` picks the relay config; the default is `all`. The profile is written into
+the generated relay config on every `up.sh`, so switch by running `up.sh` again.
+
+| Profile | Relay config | Used for |
+|---|---|---|
+| `all` | defaults: all uses allowed, broadcasts on (`max_broadcasts = 4`) | normal runs, broadcasts |
+| `no-files` | `[uses] files = false` | files disabled on the relay |
+| `no-screen` | `[uses] screen_share = false` | screen sharing disabled; no `broadcast` in `/v1/status` |
+| `no-images` | `[uses] images = false` | full-size images disabled |
+| `no-broadcast` | `[limits] max_broadcasts = 0` | pairs work, no broadcasts |
+| `old` | no `[uses]` or broadcast limits | a previous release (AC-7.5); set `MUMPEER_IMAGE` too |
+
+    MUMPEER_PROFILE=no-files testenv/up.sh
+    MUMPEER_PROFILE=old MUMPEER_IMAGE=ghcr.io/mumcord/mumpeer:<previous> MUMBOT_IMAGE=<previous mumbot> testenv/up.sh
+
+`MUMPEER_IMAGE` runs an existing image (pulled if missing) instead of building this checkout.
+Check what the relay announces with
+`curl -H "Authorization: Bearer $MUMPEER_API_SECRET" http://127.0.0.1:44760/v1/status`.
+
+For parallel runs give each instance its own `MUMPEER_PORT_BASE` and `MUMPEER_PROJECT`; the
+ports of the default instance are in the table above.
+
 Overrides: `MUMPEER_PORT_BASE` (server port; relay +1, API +2), `MUMPEER_PROJECT` (compose
-project and data dir, for parallel instances), `MUMBOT_IMAGE`, `MUMPEER_PUBLIC_HOST`,
+project and data dir, for parallel instances), `MUMPEER_PROFILE`, `MUMPEER_IMAGE`, `MUMBOT_IMAGE`, `MUMPEER_PUBLIC_HOST`,
 `MUMPEER_LOG` / `MUMBOT_LOG` (`RUST_LOG` of each service).
 
 All services use the host network and listen on all interfaces of this machine; this is a
