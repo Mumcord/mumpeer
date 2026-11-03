@@ -33,10 +33,19 @@ api_secret_file = "/run/secrets/mumpeer_api_secret"
 images = true        # full-size image transfers
 files = true         # file transfers
 screen_share = true  # screen sharing
+plugin_data = false  # data of Mumcord plugins, off by default
+
+[plugin_data]        # only used when plugin_data = true
+max_kbps_per_sender = 512  # sustained upload per sender, announced to clients
+max_broadcasts = 16        # plugin-data broadcasts at the same time
+max_share_percent = 25     # share of limits.total_mbit for plugin data (1-100)
+max_unit_bytes = 65536     # largest single data unit (at most 1048576)
 ```
 
-All three are optional and default to `true`, so a config without this section relays
-everything. Set a switch to `false` to keep that kind of traffic off your relay.
+`images`, `files` and `screen_share` are optional and default to `true`, so a config without
+this section relays everything. Set a switch to `false` to keep that kind of traffic off your
+relay. `plugin_data` is the exception: it defaults to `false` and relays nothing until you set
+it to `true`. All `[plugin_data]` values must be greater than 0.
 
 What users see: the enabled uses are announced to Mumcord through the bot. For a disabled use,
 Mumcord does not try the relay. The matching control is disabled with a reason shown, for example

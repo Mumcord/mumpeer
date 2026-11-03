@@ -91,7 +91,7 @@ one sharer and several viewers instead of a pair; see the
   `max_broadcasts` above 0. The relay forwards the sharer's video and audio to the admitted
   viewers without being able to read it. See the
   [wiki](https://github.com/Mumcord/mumpeer/wiki/Configuration#broadcasts).
-- **Allowed uses:** the `[uses]` switches (`images`, `files`, `screen_share`) let the operator
+- **Allowed uses:** the `[uses]` switches (`images`, `files`, `screen_share`, and `plugin_data` for plugin data, which is off by default) let the operator
   decide which kinds of traffic the relay carries; Mumcord shows disabled uses with a reason.
 - **Strong identity checks:** TLS 1.3 only, a client certificate is mandatory, and clients pin
   the relay's certificate by its SHA-256 fingerprint.

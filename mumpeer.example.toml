@@ -18,11 +18,20 @@ api_secret_file = "/run/secrets/mumpeer_api_secret"
 # cert_file = "/etc/mumpeer/cert.pem"
 # key_file = "/etc/mumpeer/key.pem"
 
-# Which Mumcord features may use this relay (all default to true).
+# Which Mumcord features may use this relay (all default to true, except plugin_data).
 [uses]
 images = true
 files = true
 screen_share = true
+# Data of Mumcord plugins. Off by default: turn it on only if you want to relay it.
+plugin_data = false
+
+# Limits for plugin data; only used when plugin_data = true above.
+[plugin_data]
+max_kbps_per_sender = 512   # sustained upload per sender, announced to clients
+max_broadcasts = 16         # plugin-data broadcasts at the same time
+max_share_percent = 25      # share of limits.total_mbit that plugin data may use
+max_unit_bytes = 65536      # largest single data unit
 
 [limits]
 session_mbit = 10           # bandwidth per session and direction

@@ -39,16 +39,20 @@ pub struct Config {
     pub limits: Limits,
     #[serde(default)]
     pub uses: Uses,
+    #[serde(default)]
+    pub plugin_data: PluginData,
 }
 
 /// Which Mumcord features may use this relay. A missing key means allowed, so existing configs
-/// keep relaying everything.
+/// keep relaying everything. The exception is `plugin_data`: it is off until the operator turns
+/// it on, because plugin traffic is arbitrary data the operator did not allow before.
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Uses {
     pub images: bool,
     pub files: bool,
     pub screen_share: bool,
+    pub plugin_data: bool,
 }
 
 impl Default for Uses {
@@ -57,12 +61,13 @@ impl Default for Uses {
             images: true,
             files: true,
             screen_share: true,
+            plugin_data: false,
         }
     }
 }
 
 impl Uses {
-    pub const NAMES: [&'static str; 3] = ["images", "files", "screen_share"];
+    pub const NAMES: [&'static str; 4] = ["images", "files", "screen_share", "plugin_data"];
 
     /// The enabled uses by their API names, in a fixed order.
     pub fn enabled(&self) -> Vec<&'static str> {
@@ -78,12 +83,40 @@ impl Uses {
             "images" => self.images,
             "files" => self.files,
             "screen_share" => self.screen_share,
+            "plugin_data" => self.plugin_data,
             _ => false,
         }
     }
 
+    /// A pair without a `use` is only allowed when the three original uses are on. It never
+    /// covers `plugin_data`, which must always be requested by name.
     pub fn all(&self) -> bool {
         self.images && self.files && self.screen_share
+    }
+}
+
+/// Limits for plugin data (`use = plugin_data`); only effective when `[uses] plugin_data` is on.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct PluginData {
+    /// Sustained upload of one sender; announced to clients.
+    pub max_kbps_per_sender: u32,
+    /// Plugin-data broadcasts at the same time.
+    pub max_broadcasts: u32,
+    /// Share of `limits.total_mbit` that plugin data may use, in percent.
+    pub max_share_percent: u32,
+    /// Largest single data unit in bytes.
+    pub max_unit_bytes: u32,
+}
+
+impl Default for PluginData {
+    fn default() -> Self {
+        Self {
+            max_kbps_per_sender: 512,
+            max_broadcasts: 16,
+            max_share_percent: 25,
+            max_unit_bytes: 65536,
+        }
     }
 }
 
@@ -196,6 +229,24 @@ impl Config {
                 "limits.max_viewers_per_broadcast must be at most {}",
                 u16::MAX
             );
+        }
+        let p = &self.plugin_data;
+        for (name, value) in [
+            ("max_kbps_per_sender", p.max_kbps_per_sender),
+            ("max_broadcasts", p.max_broadcasts),
+            ("max_share_percent", p.max_share_percent),
+            ("max_unit_bytes", p.max_unit_bytes),
+        ] {
+            if value == 0 {
+                bail!("plugin_data.{name} must be greater than 0");
+            }
+        }
+        if p.max_share_percent > 100 {
+            bail!("plugin_data.max_share_percent must be at most 100");
+        }
+        // One unit is buffered whole by the data plane, so its size needs a sane upper bound.
+        if p.max_unit_bytes > 1_048_576 {
+            bail!("plugin_data.max_unit_bytes must be at most 1048576");
         }
         Ok(())
     }
@@ -342,6 +393,40 @@ mod tests {
         assert!(!config.uses.all());
         assert!(Config::parse("public_host = \"a.example\"\n[uses]\nvideo = true").is_err());
         assert!(Config::parse("public_host = \"a.example\"\n[uses]\nfiles = 1").is_err());
+    }
+
+    #[test]
+    fn plugin_data_is_off_by_default_and_opt_in() {
+        let config = Config::parse("public_host = \"a.example\"").unwrap();
+        assert!(!config.uses.allows("plugin_data"));
+        assert!(config.uses.all());
+        let on = Config::parse("public_host = \"a.example\"\n[uses]\nplugin_data = true").unwrap();
+        assert_eq!(
+            on.uses.enabled(),
+            ["images", "files", "screen_share", "plugin_data"]
+        );
+        assert_eq!(on.plugin_data, PluginData::default());
+    }
+
+    #[test]
+    fn plugin_data_limits_are_validated() {
+        let parse = |body: &str| {
+            Config::parse(&format!(
+                "public_host = \"a.example\"\n[plugin_data]\n{body}"
+            ))
+        };
+        assert!(parse("max_kbps_per_sender = 128\nmax_share_percent = 100").is_ok());
+        for bad in [
+            "max_kbps_per_sender = 0",
+            "max_broadcasts = 0",
+            "max_share_percent = 0",
+            "max_share_percent = 101",
+            "max_unit_bytes = 0",
+            "max_unit_bytes = 1048577",
+            "speed = 1",
+        ] {
+            assert!(parse(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]
