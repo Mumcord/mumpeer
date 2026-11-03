@@ -30,6 +30,10 @@ pub const ALPN: &[u8] = b"mumpeer/1";
 /// Outer QUIC packets must carry one inner 1200-byte QUIC packet plus overhead (spec §6.5). A path
 /// that cannot fails the UDP attempt, and the client falls back to TCP.
 const OUTER_MTU: u16 = 1300;
+/// Unidirectional streams a client may have open at once (one per broadcast unit in flight).
+const UNI_STREAMS: u32 = 64;
+/// Unread bytes the relay accepts per connection: two of the largest video units.
+const RECEIVE_WINDOW: u32 = 9 * 1024 * 1024;
 
 const KEY_FILE: &str = "relay-key.pem";
 const CERT_FILE: &str = "relay-cert.pem";
@@ -193,7 +197,10 @@ pub fn quic_server_config(identity: &Identity) -> Result<quinn::ServerConfig> {
         .mtu_discovery_config(None)
         // One control stream per connection, opened by the client.
         .max_concurrent_bidi_streams(VarInt::from_u32(1))
-        .max_concurrent_uni_streams(VarInt::from_u32(0));
+        // A broadcast link sends every unit on its own stream (spec 07 §6.6); pair links open
+        // none. The connection window caps what any client can make the relay buffer.
+        .max_concurrent_uni_streams(VarInt::from_u32(UNI_STREAMS))
+        .receive_window(VarInt::from_u32(RECEIVE_WINDOW));
     config.transport_config(Arc::new(transport));
     Ok(config)
 }

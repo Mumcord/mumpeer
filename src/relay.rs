@@ -20,7 +20,7 @@ use tokio::net::TcpStream;
 use tokio::sync::{oneshot, watch};
 use tokio::time::{sleep_until, timeout};
 
-use crate::broadcast::Registry;
+use crate::broadcast::{self, PublisherBind, Registry, ViewerBind};
 use crate::config::{Config, Limits, Uses};
 use crate::limits::{PairRate, SourceLimits, TokenBucket, lock, mbit_to_bytes};
 use crate::tcp::{self, FRAME_CONTROL, FRAME_PACKET, MAX_FRAME};
@@ -59,6 +59,10 @@ pub enum Refusal {
     RateLimited,
     Version,
     BadRequest,
+    /// The relay does not allow screen sharing (a broadcast bind).
+    UseNotAllowed,
+    /// The broadcast has all the subscribers it may have.
+    BroadcastFull,
 }
 
 impl Refusal {
@@ -73,6 +77,8 @@ impl Refusal {
             Self::RateLimited => "rate_limited",
             Self::Version => "version",
             Self::BadRequest => "bad_request",
+            Self::UseNotAllowed => "use_not_allowed",
+            Self::BroadcastFull => "broadcast_full",
         }
     }
 
@@ -314,7 +320,8 @@ pub struct Relay {
     pub broadcasts: Registry,
     pairs: Mutex<HashMap<[u8; 32], Pair>>,
     bot_seen: Mutex<Option<Instant>>,
-    total: Mutex<TokenBucket>,
+    /// Bandwidth of everything the relay forwards, pairs and broadcasts together.
+    pub(crate) total: Mutex<TokenBucket>,
     bytes_total: AtomicU64,
 }
 
@@ -342,6 +349,15 @@ impl Relay {
 
     pub fn token_ttl_s(&self) -> u32 {
         self.limits.token_ttl_s
+    }
+
+    pub(crate) fn idle_timeout(&self) -> Duration {
+        Duration::from_secs(self.limits.idle_timeout_s.into())
+    }
+
+    /// Counts forwarded bytes for the periodic totals.
+    pub(crate) fn count_bytes(&self, bytes: usize) {
+        self.bytes_total.fetch_add(bytes as u64, Ordering::Relaxed);
     }
 
     /// Pairs with at least one bound side.
@@ -463,15 +479,56 @@ impl Relay {
 
     /// Takes over an authenticated link whose first control message was `bind_message`.
     pub async fn serve(self: Arc<Self>, link: Link, bind_message: &[u8], hash: &str, ip: IpAddr) {
-        let result = parse_bind(bind_message).and_then(|token| self.bind(&token, hash));
-        match result {
-            Err(refusal) => {
-                tracing::debug!(peer = &hash[..8], code = refusal.code(), "bind refused");
-                if refusal.is_failure() {
-                    self.sources.failed(ip);
+        let (token, role) = match parse_bind(bind_message) {
+            Ok(bind) => bind,
+            Err(refusal) => return self.refuse(link, refusal, hash, ip).await,
+        };
+        let Some(role) = role else {
+            return self.serve_pair(link, &token, hash, ip).await;
+        };
+        if self.bot_gone() {
+            return self.refuse(link, Refusal::BotGone, hash, ip).await;
+        }
+        if !self.uses.screen_share {
+            return self.refuse(link, Refusal::UseNotAllowed, hash, ip).await;
+        }
+        match role {
+            Role::Publisher => match self.broadcasts.bind_publisher(&token, hash) {
+                Ok(PublisherBind { id, session, end }) => {
+                    tracing::debug!(broadcast = %id, "bound publisher");
+                    broadcast::run_publisher(&self, link, id, session, end).await;
                 }
-                link.fail(refusal).await;
-            }
+                Err(refusal) => self.refuse(link, refusal, hash, ip).await,
+            },
+            Role::Subscriber => match self.broadcasts.bind_viewer(&token, hash) {
+                Ok(ViewerBind {
+                    id,
+                    session,
+                    subscriber,
+                    token,
+                    end,
+                }) => {
+                    tracing::debug!(broadcast = %id, "bound subscriber");
+                    let leave = || self.broadcasts.viewer_left(id, hash, &token);
+                    broadcast::run_subscriber(&self, link, id, session, subscriber, end, leave)
+                        .await;
+                }
+                Err(refusal) => self.refuse(link, refusal, hash, ip).await,
+            },
+        }
+    }
+
+    async fn refuse(&self, link: Link, refusal: Refusal, hash: &str, ip: IpAddr) {
+        tracing::debug!(peer = &hash[..8], code = refusal.code(), "bind refused");
+        if refusal.is_failure() {
+            self.sources.failed(ip);
+        }
+        link.fail(refusal).await;
+    }
+
+    async fn serve_pair(&self, link: Link, token: &str, hash: &str, ip: IpAddr) {
+        match self.bind(token, hash) {
+            Err(refusal) => self.refuse(link, refusal, hash, ip).await,
             Ok(Bind::Second(partner)) => {
                 tracing::debug!(peer = &hash[..8], "bound second side");
                 if let Err(link) = partner.send(link) {
@@ -658,10 +715,18 @@ struct BindMessage {
     v: Option<u64>,
     t: Option<String>,
     tok: Option<String>,
+    role: Option<String>,
 }
 
-/// The token from a `bind` message (spec §6.5).
-fn parse_bind(message: &[u8]) -> Result<String, Refusal> {
+/// Which side of a broadcast a link binds as; a bind without a role is a pair bind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Role {
+    Publisher,
+    Subscriber,
+}
+
+/// The token and role from a `bind` message (spec §6.5, spec 07 §6.6).
+fn parse_bind(message: &[u8]) -> Result<(String, Option<Role>), Refusal> {
     let message: BindMessage = serde_json::from_slice(message).map_err(|_| Refusal::BadRequest)?;
     if message.v != Some(1) {
         return Err(if message.v.is_some() {
@@ -670,6 +735,12 @@ fn parse_bind(message: &[u8]) -> Result<String, Refusal> {
             Refusal::BadRequest
         });
     }
+    let role = match message.role.as_deref() {
+        None => None,
+        Some("pub") => Some(Role::Publisher),
+        Some("sub") => Some(Role::Subscriber),
+        Some(_) => return Err(Refusal::BadRequest),
+    };
     let token = message.tok.filter(|_| message.t.as_deref() == Some("bind"));
     match token {
         Some(token)
@@ -678,7 +749,7 @@ fn parse_bind(message: &[u8]) -> Result<String, Refusal> {
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') =>
         {
-            Ok(token)
+            Ok((token, role))
         }
         _ => Err(Refusal::BadRequest),
     }
@@ -741,7 +812,13 @@ mod tests {
     fn parses_bind() {
         let tok = "A".repeat(43);
         let ok = format!(r#"{{"v":1,"t":"bind","tok":"{tok}"}}"#);
-        assert_eq!(parse_bind(ok.as_bytes()), Ok(tok.clone()));
+        assert_eq!(parse_bind(ok.as_bytes()), Ok((tok.clone(), None)));
+        for (role, parsed) in [("pub", Role::Publisher), ("sub", Role::Subscriber)] {
+            let bind = format!(r#"{{"v":1,"t":"bind","tok":"{tok}","role":"{role}"}}"#);
+            assert_eq!(parse_bind(bind.as_bytes()), Ok((tok.clone(), Some(parsed))));
+        }
+        let bad_role = format!(r#"{{"v":1,"t":"bind","tok":"{tok}","role":"viewer"}}"#);
+        assert_eq!(parse_bind(bad_role.as_bytes()), Err(Refusal::BadRequest));
         let v2 = format!(r#"{{"v":2,"t":"bind","tok":"{tok}"}}"#);
         assert_eq!(parse_bind(v2.as_bytes()), Err(Refusal::Version));
         assert_eq!(
