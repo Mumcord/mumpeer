@@ -9,7 +9,8 @@ connect to the relay, and it forwards their end-to-end encrypted packets to each
 
 - The **Mumble server stays unmodified**: no plugin, no config change.
 - The **relay cannot read** what it forwards; it only sees encrypted bytes.
-- It is **not an open proxy**: it forwards only between two users your bot paired.
+- It is **not an open proxy**: it forwards only between two users your bot paired, or from a
+  sharer to the viewers your bot admitted to a broadcast.
 
 ## Start here
 

@@ -21,7 +21,7 @@
 - **Pair tokens.** The bot asks for a pair of two certificate hashes and gets a 256-bit random
   token. Only those two certificates can use it, each side once, within 120 seconds by default.
   The relay keeps only a SHA-256 hash of the token.
-- **No open proxy.** The relay forwards only between the two bound sides of one pair and never
+- **No open proxy.** The relay forwards only between the two bound sides of one pair, or from the sharer of a broadcast to its admitted viewers, and never
   opens a connection itself.
 
 ## The bot API

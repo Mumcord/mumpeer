@@ -44,7 +44,7 @@ None of the pieces touches the Mumble server:
 | --- | --- |
 | **Mumble server** (murmur / mumble-server) | Unmodified. Carries voice, chat and the small signalling messages between clients and the bot. |
 | **[mumbot](https://github.com/Mumcord/mumbot) `peer`** | A bot user on the Mumble server. Tells Mumcord clients that the relay exists (address, ports, certificate fingerprint) and asks mumpeer for a short-lived token for each pair of users. |
-| **mumpeer** (this repo) | The relay. Accepts only pairs the bot created and forwards packets between exactly those two clients. |
+| **mumpeer** (this repo) | The relay. Accepts only pairs the bot created and forwards packets between exactly those two clients (or, for a broadcast, from the sharer to its viewers). |
 | **[Mumcord](https://github.com/Mumcord/mumcord)** | The client. Tries a direct connection first (unless the user hides their IP), then falls back to the relay. |
 
 Mumcord works fully without bot and relay; they only add a fallback.
