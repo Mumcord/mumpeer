@@ -23,7 +23,7 @@ fn every_profile_parses_with_its_uses_and_limits() {
     let all = profile("all").unwrap();
     assert_eq!(
         all.uses.enabled(),
-        ["images", "files", "screen_share", "camera"]
+        ["images", "files", "screen_share", "camera", "plugin_data"]
     );
     assert_eq!(
         (all.limits.max_broadcasts, all.limits.max_camera_broadcasts),
@@ -55,7 +55,19 @@ fn every_profile_parses_with_its_uses_and_limits() {
         assert!(!config.uses.allows(off), "{name}");
         assert!(config.uses.camera, "{name}");
     }
-    assert_eq!(profile("old").unwrap().uses, all.uses);
+    assert_eq!(profile("plugin-data").unwrap().uses, all.uses);
+    let no_plugin_data = profile("no-plugin-data").unwrap();
+    assert_eq!(
+        no_plugin_data.uses.enabled(),
+        ["images", "files", "screen_share", "camera"]
+    );
+    assert!(no_plugin_data.uses.all());
+    let old = profile("old").unwrap();
+    assert!(
+        !old.uses.plugin_data,
+        "a previous release has no plugin data"
+    );
+    assert_eq!(old.plugin_data, no_plugin_data.plugin_data);
     assert!(
         profile("video")
             .unwrap_err()

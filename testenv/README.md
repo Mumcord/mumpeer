@@ -32,13 +32,15 @@ the generated relay config on every `up.sh`, so switch by running `up.sh` again.
 
 | Profile | Relay config | Used for |
 |---|---|---|
-| `all` | defaults: all uses allowed, broadcasts on (`max_broadcasts = 4`, `max_camera_broadcasts = 18`) | normal runs, broadcasts |
+| `all` | all uses allowed including `[uses] plugin_data = true`, default `[plugin_data]` limits, broadcasts on (`max_broadcasts = 4`, `max_camera_broadcasts = 18`) | normal runs, broadcasts, plugin data |
 | `no-files` | `[uses] files = false` | files disabled on the relay |
 | `no-screen` | `[uses] screen_share = false` | screen sharing disabled; no `broadcast` in `/v1/status` |
 | `no-images` | `[uses] images = false` | full-size images disabled |
 | `no-camera` | `[uses] camera = false` | camera sharing disabled; `broadcast.max_camera` is 0 in `/v1/status` |
+| `plugin-data` | `[uses] plugin_data = true` | plugin data on, default limits (`plugin_data.max_kbps_per_sender = 512` in `/v1/status`) |
+| `no-plugin-data` | `[uses] plugin_data = false` | plugin data off (the relay default); `plugin_data` is missing from `uses` in `/v1/status` |
 | `no-broadcast` | `[limits] max_broadcasts = 0`, `max_camera_broadcasts = 0` | pairs work, no broadcasts |
-| `old` | no `[uses]` or broadcast limits | a previous release (AC-7.5); set `MUMPEER_IMAGE` too |
+| `old` | no `[uses]` or broadcast limits (plugin data off) | a previous release (AC-7.5); set `MUMPEER_IMAGE` too |
 
     MUMPEER_PROFILE=no-files testenv/up.sh
     MUMPEER_PROFILE=old MUMPEER_IMAGE=ghcr.io/mumcord/mumpeer:<previous> MUMBOT_IMAGE=<previous mumbot> testenv/up.sh

@@ -23,6 +23,9 @@ All notable changes to mumpeer are listed here. The format follows
 - Plugin data plane: plugin-data broadcasts carry the new `data` unit kind, and plugin data has
   the lowest priority behind every other use. The `[plugin_data]` limits are enforced: per-sender
   rate, share of the total bandwidth, unit size and a separate broadcast cap.
+- Test environment profiles `plugin-data` and `no-plugin-data`; the `all` profile now turns plugin
+  data on.
+- README: plugin data (`[uses] plugin_data`, the `[plugin_data]` limits and the lowest priority).
 - Relay for Mumcord peer-to-peer features: QUIC over UDP and TLS over TCP (for networks that
   block UDP), mutual TLS with the Mumble client certificate, pair-bound tokens, and unchanged
   forwarding of the end-to-end encrypted inner packets between the two sides of a pair only.
