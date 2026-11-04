@@ -154,8 +154,18 @@ async fn api(relay: &Relay, method: &str, path: &str, body: &str, secret: &str) 
 }
 
 async fn create(relay: &Relay, publisher: &Identity, max: u16) -> (String, String) {
+    create_for(relay, publisher, max, "").await
+}
+
+/// `use_field` is empty or a `,"use":"…"` member.
+async fn create_for(
+    relay: &Relay,
+    publisher: &Identity,
+    max: u16,
+    use_field: &str,
+) -> (String, String) {
     let body = format!(
-        r#"{{"publisher":"{}","max_viewers":{max}}}"#,
+        r#"{{"publisher":"{}","max_viewers":{max}{use_field}}}"#,
         publisher.hash
     );
     let (status, body) = api(relay, "POST", "/v1/broadcasts", &body, SECRET).await;
@@ -214,6 +224,7 @@ const KEY: u8 = 2;
 const KF: u8 = 3;
 const LAYERS: u8 = 4;
 const GONE: u8 = 5;
+const WANT: u8 = 6;
 
 struct Quic {
     conn: Connection,
@@ -589,6 +600,75 @@ async fn binds_are_checked() {
     assert_eq!(sub.control().await["t"], "ready");
     sub.send(&video(true, 0, 1, 10)).await;
     assert_eq!(sub.control().await["reason"], "closed");
+}
+
+#[tokio::test]
+async fn camera_broadcasts_forward_want_at_most_once_a_second() {
+    let relay = relay("", "").await;
+    let (publisher, a, b) = (identity(), identity(), identity());
+    let (id, tok) = create_for(&relay, &publisher, 25, r#","use":"camera""#).await;
+    let a_tok = admit(&relay, &id, &a).await;
+    let b_tok = admit(&relay, &id, &b).await;
+    let mut publisher = quic_bind(&relay, &publisher, &bind(&tok, Some("pub"))).await;
+    assert_eq!(publisher.control().await["t"], "ready");
+    let mut a = quic_bind(&relay, &a, &bind(&a_tok, Some("sub"))).await;
+    assert_eq!(a.control().await["t"], "ready");
+    let mut b = tcp_bind(&relay, &b, &bind(&b_tok, Some("sub"))).await;
+    assert_eq!(b.control().await["t"], "ready");
+
+    // Media flows as in a screen share.
+    publisher.send(&video(true, 0, 1, 2000)).await;
+    assert_eq!(a.recv().await, video(true, 0, 1, 2000));
+    assert_eq!(b.recv().await, video(true, 0, 1, 2000));
+
+    // want: the relay puts the subscriber's slot in front of the tile height.
+    b.send(&control(WANT, &360u16.to_be_bytes())).await;
+    let want = publisher.recv().await;
+    assert_eq!(kind_of(&want), (3, WANT));
+    let (b_slot, height) = payload(&want).split_at(2);
+    assert_eq!(height, 360u16.to_be_bytes());
+
+    // A second want within the second is dropped; the link stays up and other subscribers
+    // have their own second.
+    b.send(&control(WANT, &720u16.to_be_bytes())).await;
+    a.send(&control(WANT, &180u16.to_be_bytes())).await;
+    let want = publisher.recv().await;
+    assert_eq!(kind_of(&want), (3, WANT));
+    let (a_slot, height) = payload(&want).split_at(2);
+    assert_ne!(a_slot, b_slot);
+    assert_eq!(height, 180u16.to_be_bytes());
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    b.send(&control(WANT, &540u16.to_be_bytes())).await;
+    let want = publisher.recv().await;
+    assert_eq!(payload(&want), [b_slot, &540u16.to_be_bytes()[..]].concat());
+
+    publisher.send(&video(false, 0, 2, 500)).await;
+    assert_eq!(b.recv().await, video(false, 0, 2, 500));
+}
+
+#[tokio::test]
+async fn camera_broadcasts_need_the_camera_use() {
+    let relay = relay("", "[uses]\ncamera = false").await;
+    let publisher = identity();
+    let body = format!(
+        r#"{{"publisher":"{}","max_viewers":25,"use":"camera"}}"#,
+        publisher.hash
+    );
+    let (status, body) = api(&relay, "POST", "/v1/broadcasts", &body, SECRET).await;
+    assert_eq!(
+        (status, body.as_str()),
+        (403, r#"{"code":"use_not_allowed"}"#)
+    );
+    let (status, body) = api(&relay, "GET", "/v1/status", "", SECRET).await;
+    assert_eq!(status, 200);
+    let status: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        status["uses"],
+        serde_json::json!(["images", "files", "screen_share"])
+    );
+    assert_eq!(status["broadcast"]["max_camera"], 0);
+    // Screen shares keep working.
+    create(&relay, &publisher, 25).await;
 }
 
 #[tokio::test]
