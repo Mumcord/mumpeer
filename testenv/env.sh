@@ -3,7 +3,7 @@
 #                      loopback (default 44758, away from a real server's 64738 and from the
 #                      Mumcord and Mumbot test servers)
 #   MUMPEER_PROFILE    relay config: all (default), no-files, no-screen, no-images,
-#                      no-camera, no-broadcast, old
+#                      no-camera, plugin-data, no-plugin-data, no-broadcast, old
 #   MUMPEER_IMAGE      run this existing mumpeer image instead of building the checkout
 #   MUMPEER_PROJECT    compose project name (default mumpeer-testenv); a non-default name also
 #                      gets its own data dir (data/_<name>, git-ignored)
