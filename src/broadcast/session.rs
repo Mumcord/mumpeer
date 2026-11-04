@@ -173,6 +173,7 @@ impl Session {
             }
             // Other control units are not the publisher's to send; ignored for compatibility.
             Content::Control(_) => true,
+            Content::Data => false,
         }
     }
 
@@ -198,7 +199,7 @@ impl Session {
                 true
             }
             Content::Control(_) => true,
-            Content::Video { .. } | Content::Audio => false,
+            Content::Video { .. } | Content::Audio | Content::Data => false,
         }
     }
 }

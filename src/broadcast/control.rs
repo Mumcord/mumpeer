@@ -1,6 +1,7 @@
 //! The broadcast wire format: the 14-byte clear header in front of every unit and the control
-//! units the relay reads or writes (spec 07 FR-7.43, §6.6). It mirrors `mumcord_p2p::broadcast`
-//! byte for byte and asserts the same test vectors; media payloads stay opaque.
+//! units the relay reads or writes (spec 07 FR-7.43, §6.6), plus the `data` kind of plugin-data
+//! broadcasts (spec 09 FR-9.59). It mirrors `mumcord_p2p::broadcast` byte for byte and asserts the
+//! same test vectors; media and plugin payloads stay opaque.
 
 use bytes::{BufMut, Bytes, BytesMut};
 
@@ -8,9 +9,12 @@ pub const HEADER_VERSION: u8 = 1;
 pub const HEADER_LEN: usize = 14;
 pub const MAX_TEMPORAL_LAYER: u8 = 3;
 /// AES-GCM tag and SFrame header in front of an encrypted media payload.
-const ENCRYPTION_OVERHEAD: u32 = 64;
+pub const ENCRYPTION_OVERHEAD: u32 = 64;
 pub const MAX_VIDEO_PAYLOAD: u32 = 4 * 1024 * 1024 + ENCRYPTION_OVERHEAD;
 pub const MAX_AUDIO_PAYLOAD: u32 = 4 * 1024 + ENCRYPTION_OVERHEAD;
+/// The largest plugin-data payload any config allows (`plugin_data.max_unit_bytes` is at most
+/// 1 MiB); the session narrows it to the configured size.
+pub const MAX_DATA_PAYLOAD: u32 = 1024 * 1024 + ENCRYPTION_OVERHEAD;
 /// The opaque body of a `keyreq` or `key`.
 pub const MAX_KEY_BODY: u32 = 1024;
 pub const SLOT_LEN: u32 = 2;
@@ -18,6 +22,7 @@ pub const SLOT_LEN: u32 = 2;
 const KIND_VIDEO: u8 = 1;
 const KIND_AUDIO: u8 = 2;
 const KIND_CONTROL: u8 = 3;
+const KIND_DATA: u8 = 4;
 const FLAG_KEYFRAME: u8 = 0b1;
 const CODEC_VP9: u8 = 1;
 const CODEC_AV1: u8 = 2;
@@ -73,6 +78,8 @@ pub enum Content {
         temporal_layer: u8,
     },
     Audio,
+    /// One unit of plugin data (`k = plg` broadcasts only), codec 0.
+    Data,
     Control(ControlKind),
 }
 
@@ -114,6 +121,7 @@ impl Header {
                 },
             ),
             Content::Audio => (KIND_AUDIO, 0, 0, CODEC_OPUS),
+            Content::Data => (KIND_DATA, 0, 0, 0),
             Content::Control(control) => (KIND_CONTROL, 0, 0, control as u8),
         };
         let mut out = [0u8; HEADER_LEN];
@@ -153,6 +161,7 @@ impl Header {
                 }
             }
             KIND_AUDIO if codec == CODEC_OPUS => Content::Audio,
+            KIND_DATA if codec == 0 => Content::Data,
             KIND_CONTROL => Content::Control(ControlKind::from_byte(codec).ok_or(BadHeader)?),
             _ => return Err(BadHeader),
         };
@@ -173,6 +182,7 @@ impl Header {
                 (1, MAX_VIDEO_PAYLOAD)
             }
             Content::Audio => (1, MAX_AUDIO_PAYLOAD),
+            Content::Data => (1, MAX_DATA_PAYLOAD),
             Content::Control(control) => {
                 if header.key_id != 0 || header.sequence != 0 {
                     return Err(BadHeader);
@@ -398,6 +408,15 @@ mod tests {
                 "0103000005000000000000000002",
                 Header::control(ControlKind::Gone, 2),
             ),
+            (
+                "010400000003000000070000015e",
+                Header {
+                    content: Content::Data,
+                    key_id: 3,
+                    sequence: 7,
+                    payload_len: 350,
+                },
+            ),
         ]
     }
 
@@ -413,7 +432,7 @@ mod tests {
     fn invalid_headers_are_refused() {
         let bad = [
             "0201010002020000000100000400", // version
-            "0104010002020000000100000400", // kind
+            "0105000000020000000100000400", // kind
             "0101030002020000000100000400", // flags
             "0101010402020000000100000400", // layer 4
             "0101010003020000000100000400", // video codec
@@ -428,6 +447,11 @@ mod tests {
             "0101010002020000000100000000", // empty video
             "0101010002020000000100400041", // video over 4 MiB + 64
             "0102000003020000000200001041", // audio over 4 KiB + 64
+            "0104000001030000000700000010", // data codec
+            "0104010000030000000700000010", // data flags
+            "0104000100030000000700000010", // data layer
+            "0104000000030000000700000000", // empty data
+            "0104000000030000000700100041", // data over 1 MiB + 64
             "01010100020200000001000004",   // truncated
         ];
         for text in bad {

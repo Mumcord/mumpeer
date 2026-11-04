@@ -5,7 +5,8 @@
 //! subscriber never holds up the others.
 //!
 //! Sound has its own short queue and goes out before waiting pictures; control units (`key`)
-//! go out first of all. Every queue is bounded.
+//! go out first of all. Plugin data (spec 09 FR-9.85) has the lowest priority: it goes out only
+//! when nothing else waits. Every queue is bounded.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -28,6 +29,8 @@ const RAISE_AFTER: Duration = Duration::from_secs(3);
 const AUDIO_CAPACITY: usize = 25;
 /// `key` units waiting for one subscriber; it gets one per key change.
 const CONTROL_CAPACITY: usize = 8;
+/// Plugin-data units waiting for one subscriber; a sender over its rate loses the oldest.
+const DATA_CAPACITY: usize = 32;
 
 /// What the relay has to do after a unit was queued.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -40,6 +43,7 @@ pub struct Policy {
     frames: VecDeque<Unit>,
     audio: VecDeque<Unit>,
     control: VecDeque<Unit>,
+    data: VecDeque<Unit>,
     /// Highest temporal layer the pacing allows.
     max_layer: u8,
     /// Highest temporal layer the subscriber asked for (`layers`).
@@ -62,6 +66,7 @@ impl Policy {
             frames: VecDeque::with_capacity(CAPACITY),
             audio: VecDeque::with_capacity(AUDIO_CAPACITY),
             control: VecDeque::with_capacity(CONTROL_CAPACITY),
+            data: VecDeque::new(),
             max_layer: MAX_TEMPORAL_LAYER,
             wanted_layer: MAX_TEMPORAL_LAYER,
             wait_keyframe: true,
@@ -83,6 +88,10 @@ impl Policy {
             }
             Content::Control(_) => {
                 push_bounded(&mut self.control, CONTROL_CAPACITY, unit);
+                return Pushed::default();
+            }
+            Content::Data => {
+                push_bounded(&mut self.data, DATA_CAPACITY, unit);
                 return Pushed::default();
             }
         };
@@ -143,6 +152,7 @@ impl Policy {
             .pop_front()
             .or_else(|| self.audio.pop_front())
             .or_else(|| self.frames.pop_front())
+            .or_else(|| self.data.pop_front())
     }
 
     #[cfg(test)]
@@ -259,6 +269,18 @@ mod tests {
         }
     }
 
+    fn data(sequence: u32) -> Unit {
+        Unit {
+            header: Header {
+                content: Content::Data,
+                key_id: 0,
+                sequence,
+                payload_len: 1,
+            },
+            bytes: Bytes::new(),
+        }
+    }
+
     /// The L1T3 layer of the `n`th frame after a keyframe.
     fn layer(n: usize) -> u8 {
         match n % 4 {
@@ -365,6 +387,31 @@ mod tests {
         policy.resync();
         policy.push(video(false, 0), now);
         assert!(policy.pop().is_some(), "frames before the loss still play");
+        assert!(policy.pop().is_none());
+    }
+
+    #[test]
+    fn data_goes_out_last_needs_no_keyframe_and_is_bounded() {
+        let mut policy = Policy::new();
+        let now = Instant::now();
+        for sequence in 0..u32::try_from(DATA_CAPACITY).unwrap() + 3 {
+            assert_eq!(policy.push(data(sequence), now), Pushed::default());
+        }
+        policy.push(video(true, 0), now);
+        policy.push(audio(), now);
+        policy.push(Unit::key(b"k"), now);
+        let order: Vec<_> = (0..3)
+            .filter_map(|_| policy.pop())
+            .map(|u| u.header.content)
+            .collect();
+        assert!(matches!(
+            order[..],
+            [Content::Control(_), Content::Audio, Content::Video { .. }]
+        ));
+        // The oldest data units were dropped; the rest leave in order.
+        for sequence in 3..u32::try_from(DATA_CAPACITY).unwrap() + 3 {
+            assert_eq!(policy.pop().map(|u| u.header.sequence), Some(sequence));
+        }
         assert!(policy.pop().is_none());
     }
 }
