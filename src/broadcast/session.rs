@@ -1,6 +1,8 @@
 //! The data plane of one broadcast (spec 07 FR-7.41, FR-7.45, FR-7.50): the publisher's link
 //! uploads units once, the relay copies media into every subscriber's queue and routes the few
-//! control units between them.
+//! control units between them. A plugin-data broadcast (spec 09 FR-9.59, FR-9.85, FR-9.86) works
+//! the same way with `data` units instead of media: each publisher is one sender with its own
+//! rate cap, and its units only get the bandwidth voice and media leave over.
 //!
 //! Units travel on QUIC as one unidirectional stream each (small control units may also come as
 //! a datagram), on TCP as a byte stream cut into `0x01` frames. The relay parses only the clear
@@ -16,10 +18,14 @@ use tokio::io::{AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::sync::watch;
 use tokio::time::timeout;
 
-use super::control::{Assembler, Content, ControlKind, HEADER_LEN, Header, MAX_KEY_BODY, Unit};
+use super::control::{
+    Assembler, Content, ControlKind, ENCRYPTION_OVERHEAD, HEADER_LEN, Header, MAX_DATA_PAYLOAD,
+    MAX_KEY_BODY, Unit,
+};
 use super::queue::{ControlQueue, Queue};
 use super::registry::{BroadcastEnd, BroadcastId};
-use crate::limits::{TokenBucket, lock, mbit_to_bytes};
+use crate::config::PluginData;
+use crate::limits::{Bandwidth, TokenBucket, kbit_to_bytes, lock, mbit_to_bytes};
 use crate::relay::{Link, Relay, TlsStream};
 use crate::tcp::{self, FRAME_CONTROL, FRAME_PACKET, MAX_FRAME};
 
@@ -52,6 +58,9 @@ impl Subscriber {
 /// Shared state of one broadcast's links. The registry owns it; locks are held only to move a
 /// unit in or out of a queue, never across I/O.
 pub struct Session {
+    /// The largest `data` payload the publisher may send; `None` for a screen share, whose
+    /// publisher sends media instead.
+    max_data_payload: Option<u32>,
     subscribers: Mutex<Vec<Arc<Subscriber>>>,
     to_publisher: ControlQueue,
     last_keyframe_request: Mutex<Option<Instant>>,
@@ -59,20 +68,53 @@ pub struct Session {
     outbound: Mutex<TokenBucket>,
     bytes_in: AtomicU64,
     bytes_out: AtomicU64,
+    /// Plugin-data units from the publisher dropped over a limit.
+    dropped: AtomicU64,
     peak_viewers: AtomicUsize,
 }
 
 impl Session {
+    /// A screen-share broadcast.
     pub fn new(in_mbit: u32, out_mbit: u32) -> Self {
+        Self::with(None, mbit_to_bytes(in_mbit), out_mbit)
+    }
+
+    /// A plugin-data broadcast: the publisher is one sender, capped at `max_kbps_per_sender`.
+    pub fn plugin_data(limits: &PluginData, out_mbit: u32) -> Self {
+        let max_payload = limits
+            .max_unit_bytes
+            .saturating_add(ENCRYPTION_OVERHEAD)
+            .min(MAX_DATA_PAYLOAD);
+        Self::with(
+            Some(max_payload),
+            kbit_to_bytes(limits.max_kbps_per_sender),
+            out_mbit,
+        )
+    }
+
+    fn with(max_data_payload: Option<u32>, in_bytes_per_s: f64, out_mbit: u32) -> Self {
         Self {
+            max_data_payload,
             subscribers: Mutex::new(Vec::new()),
             to_publisher: ControlQueue::new(PUBLISHER_CONTROL),
             last_keyframe_request: Mutex::new(None),
-            inbound: Mutex::new(TokenBucket::new(mbit_to_bytes(in_mbit))),
+            inbound: Mutex::new(TokenBucket::new(in_bytes_per_s)),
             outbound: Mutex::new(TokenBucket::new(mbit_to_bytes(out_mbit))),
             bytes_in: AtomicU64::new(0),
             bytes_out: AtomicU64::new(0),
+            dropped: AtomicU64::new(0),
             peak_viewers: AtomicUsize::new(0),
+        }
+    }
+
+    /// Whether the publisher may send a unit with this header: media in a screen share, `data` of
+    /// at most the configured size in a plugin-data broadcast, control units in both. Anything
+    /// else ends its link before the payload is read.
+    pub fn accepts_from_publisher(&self, header: &Header) -> bool {
+        match (header.content, self.max_data_payload) {
+            (Content::Control(_), _) | (Content::Video { .. } | Content::Audio, None) => true,
+            (Content::Data, Some(max)) => header.payload_len <= max,
+            _ => false,
         }
     }
 
@@ -128,13 +170,14 @@ impl Session {
         self.to_publisher.push(Unit::keyframe_request());
     }
 
-    /// A unit from the publisher. `false` means the link broke the protocol.
-    pub fn publisher_unit(&self, unit: Unit, total: &Mutex<TokenBucket>, now: Instant) -> bool {
+    /// A unit from the publisher, which passed [`Self::accepts_from_publisher`]. `false` means
+    /// the link broke the protocol.
+    pub fn publisher_unit(&self, unit: Unit, bandwidth: &Bandwidth, now: Instant) -> bool {
         match unit.header.content {
             Content::Video { .. } | Content::Audio => {
                 let len = unit.bytes.len();
                 let over = lock(&self.inbound).spend(len, now).is_err()
-                    || lock(total).spend(len, now).is_err();
+                    || lock(&bandwidth.total).spend(len, now).is_err();
                 if over {
                     // A lost picture breaks every later one until the next keyframe.
                     if matches!(unit.header.content, Content::Video { .. }) {
@@ -173,7 +216,22 @@ impl Session {
             }
             // Other control units are not the publisher's to send; ignored for compatibility.
             Content::Control(_) => true,
-            Content::Data => false,
+            Content::Data => {
+                // Plugin data is not worth a delay: over a limit the unit is dropped, and the
+                // sender's own pacing has to catch up.
+                let len = unit.bytes.len();
+                let over = lock(&self.inbound).spend(len, now).is_err()
+                    || bandwidth.spend_plugin_data(len, now).is_err();
+                if over {
+                    self.dropped.fetch_add(1, Ordering::Relaxed);
+                    return true;
+                }
+                self.bytes_in.fetch_add(len as u64, Ordering::Relaxed);
+                for subscriber in lock(&self.subscribers).iter() {
+                    subscriber.queue.push(unit.clone(), now);
+                }
+                true
+            }
         }
     }
 
@@ -391,10 +449,10 @@ pub async fn run_publisher(
 
     let outcome = if tx.control(READY).await {
         tokio::select! {
-            () = rx.run(|_| true, |unit| {
+            () = rx.run(|header| session.accepts_from_publisher(header), |unit| {
                 let now = Instant::now();
                 last_unit.store(since_start(now), Ordering::Relaxed);
-                session.publisher_unit(unit, &relay.total, now)
+                session.publisher_unit(unit, &relay.bandwidth, now)
             }) => BroadcastEnd::Closed,
             () = async {
                 loop {
@@ -425,10 +483,12 @@ pub async fn run_publisher(
     tx.close(reason(Some(outcome))).await;
     tracing::info!(
         broadcast = %id,
+        plugin_data = session.max_data_payload.is_some(),
         viewers = session.peak_viewers.load(Ordering::Relaxed),
         duration_s = started.elapsed().as_secs(),
         bytes_in = session.bytes_in.load(Ordering::Relaxed),
         bytes_out = session.bytes_out.load(Ordering::Relaxed),
+        dropped = session.dropped.load(Ordering::Relaxed),
         reason = reason(Some(outcome)),
         "broadcast ended"
     );
@@ -466,6 +526,7 @@ pub async fn run_subscriber(
 /// Sends queued units, paced by the broadcast's outbound limit and the relay's total: while a
 /// subscriber waits for its share of the bandwidth its queue grows, which costs it temporal
 /// layers first. Waiting instead of dropping keeps a keyframe burst to many subscribers whole.
+/// Plugin data waits for spare bandwidth within its share; meanwhile its queue drops the oldest.
 async fn send_to_subscriber(
     relay: &Relay,
     session: &Session,
@@ -475,15 +536,15 @@ async fn send_to_subscriber(
     loop {
         let unit = subscriber.queue.next().await;
         let len = unit.bytes.len();
-        let media = !matches!(unit.header.content, Content::Control(_));
-        if media {
-            for bucket in [&session.outbound, &relay.total] {
-                loop {
-                    let spent = lock(bucket).spend(len, Instant::now());
-                    match spent {
-                        Ok(()) => break,
-                        Err(wait) => tokio::time::sleep(wait).await,
-                    }
+        match unit.header.content {
+            Content::Control(_) => {}
+            Content::Data => {
+                pace(|now| lock(&session.outbound).spend(len, now)).await;
+                pace(|now| relay.bandwidth.spend_plugin_data(len, now)).await;
+            }
+            Content::Video { .. } | Content::Audio => {
+                for bucket in [&session.outbound, &relay.bandwidth.total] {
+                    pace(|now| lock(bucket).spend(len, now)).await;
                 }
             }
         }
@@ -492,6 +553,13 @@ async fn send_to_subscriber(
         }
         session.bytes_out.fetch_add(len as u64, Ordering::Relaxed);
         relay.count_bytes(len);
+    }
+}
+
+/// Waits until `spend` lets the unit pass.
+async fn pace(mut spend: impl FnMut(Instant) -> Result<(), Duration>) {
+    while let Err(wait) = spend(Instant::now()) {
+        tokio::time::sleep(wait).await;
     }
 }
 
@@ -536,8 +604,29 @@ mod tests {
         session.to_publisher.try_pop()
     }
 
-    fn total() -> Mutex<TokenBucket> {
-        Mutex::new(TokenBucket::new(mbit_to_bytes(200)))
+    fn total() -> Bandwidth {
+        Bandwidth::new(200, 25)
+    }
+
+    fn data(sequence: u32, len: usize) -> Unit {
+        let header = Header {
+            content: Content::Data,
+            key_id: 1,
+            sequence,
+            payload_len: u32::try_from(len).unwrap(),
+        };
+        let mut bytes = header.encode().to_vec();
+        bytes.resize(HEADER_LEN + len, 7);
+        Unit::parse(Bytes::from(bytes)).unwrap()
+    }
+
+    fn plugin_session(max_kbps_per_sender: u32, max_unit_bytes: u32) -> Session {
+        let limits = PluginData {
+            max_kbps_per_sender,
+            max_unit_bytes,
+            ..PluginData::default()
+        };
+        Session::plugin_data(&limits, 300)
     }
 
     #[test]
@@ -649,5 +738,57 @@ mod tests {
         assert_eq!(pop(&a.queue).map(|u| u.bytes.len()), Some(200_014));
         assert!(pop(&a.queue).is_none());
         assert!(pop_publisher(&session).is_some(), "asks for a keyframe");
+    }
+
+    #[test]
+    fn each_broadcast_accepts_only_its_own_units() {
+        let screen = Session::new(15, 300);
+        let plugin = plugin_session(512, 1000);
+        let key = control(ControlKind::Key, b"\x00\x01k").header;
+        for session in [&screen, &plugin] {
+            assert!(session.accepts_from_publisher(&key));
+        }
+        assert!(screen.accepts_from_publisher(&video(true, 0).header));
+        assert!(!screen.accepts_from_publisher(&data(1, 10).header));
+        assert!(!plugin.accepts_from_publisher(&video(true, 0).header));
+        // The unit size cap counts the payload without the encryption overhead.
+        assert!(plugin.accepts_from_publisher(&data(1, 1064).header));
+        assert!(!plugin.accepts_from_publisher(&data(1, 1065).header));
+    }
+
+    #[test]
+    fn data_reaches_every_subscriber_within_the_sender_cap() {
+        // 512 kbit/s is 64 KB/s with a 64 KiB burst.
+        let session = plugin_session(512, 65536);
+        let (a, b) = (session.add(0), session.add(1));
+        let bandwidth = total();
+        let now = Instant::now();
+        for sequence in 0..4 {
+            assert!(session.publisher_unit(data(sequence, 30_000), &bandwidth, now));
+        }
+        for subscriber in [&a, &b] {
+            let got: Vec<_> = std::iter::from_fn(|| pop(&subscriber.queue))
+                .map(|u| u.header.sequence)
+                .collect();
+            // The third unit overdraws the burst, the fourth finds the bucket empty.
+            assert_eq!(got, [0, 1, 2]);
+        }
+        assert_eq!(session.dropped.load(Ordering::Relaxed), 1);
+        let later = now + Duration::from_secs(2);
+        assert!(session.publisher_unit(data(4, 30_000), &bandwidth, later));
+        assert_eq!(pop(&a.queue).map(|u| u.header.sequence), Some(4));
+    }
+
+    #[test]
+    fn data_never_takes_the_bandwidth_media_needs() {
+        let session = plugin_session(100_000, 65536);
+        let subscriber = session.add(0);
+        let bandwidth = Bandwidth::new(8, 100);
+        let now = Instant::now();
+        // Screen sharing elsewhere has used most of the total burst.
+        assert!(lock(&bandwidth.total).take(60_000, now));
+        assert!(session.publisher_unit(data(0, 1_000), &bandwidth, now));
+        assert!(pop(&subscriber.queue).is_none());
+        assert_eq!(session.dropped.load(Ordering::Relaxed), 1);
     }
 }

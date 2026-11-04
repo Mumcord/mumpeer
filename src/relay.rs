@@ -22,7 +22,9 @@ use tokio::time::{sleep_until, timeout};
 
 use crate::broadcast::{self, PublisherBind, Registry, ViewerBind};
 use crate::config::{Config, Limits, PluginData, Uses};
-use crate::limits::{PairRate, SourceLimits, TokenBucket, lock, mbit_to_bytes};
+use crate::limits::{
+    Bandwidth, PairRate, SourceLimits, TokenBucket, kbit_to_bytes, lock, mbit_to_bytes,
+};
 use crate::tcp::{self, FRAME_CONTROL, FRAME_PACKET, MAX_FRAME};
 use crate::{base64url, hex, random, sha256};
 
@@ -270,6 +272,8 @@ impl LinkTx {
 
 struct Pair {
     hashes: [String; 2],
+    /// `use = plugin_data`: each side is one sender with the plugin-data limits.
+    plugin_data: bool,
     expires_at: Instant,
     bound: [bool; 2],
     /// Set by the first `bind`; from then on the pair counts as a session.
@@ -293,14 +297,18 @@ impl Pair {
     }
 }
 
+/// The first side of a pair, waiting for the second.
+struct FirstSide {
+    key: [u8; 32],
+    id: String,
+    plugin_data: bool,
+    expires_at: Instant,
+    partner: oneshot::Receiver<Link>,
+    end: watch::Receiver<Option<EndReason>>,
+}
+
 enum Bind {
-    First {
-        key: [u8; 32],
-        id: String,
-        expires_at: Instant,
-        partner: oneshot::Receiver<Link>,
-        end: watch::Receiver<Option<EndReason>>,
-    },
+    First(FirstSide),
     Second(oneshot::Sender<Link>),
 }
 
@@ -321,8 +329,9 @@ pub struct Relay {
     pub broadcasts: Registry,
     pairs: Mutex<HashMap<[u8; 32], Pair>>,
     bot_seen: Mutex<Option<Instant>>,
-    /// Bandwidth of everything the relay forwards, pairs and broadcasts together.
-    pub(crate) total: Mutex<TokenBucket>,
+    /// Bandwidth of everything the relay forwards, pairs and broadcasts together, and the share
+    /// plugin data may use of it.
+    pub(crate) bandwidth: Bandwidth,
     bytes_total: AtomicU64,
 }
 
@@ -334,8 +343,8 @@ impl Relay {
             boot_id: hex(&random::<8>()),
             sources: SourceLimits::new(&limits),
             pair_rate: PairRate::new(limits.pairs_per_min),
-            broadcasts: Registry::new(&limits),
-            total: Mutex::new(TokenBucket::new(mbit_to_bytes(limits.total_mbit))),
+            broadcasts: Registry::new(config),
+            bandwidth: Bandwidth::new(limits.total_mbit, config.plugin_data.max_share_percent),
             limits,
             uses: config.uses,
             plugin_data: config.plugin_data,
@@ -377,9 +386,15 @@ impl Relay {
         lock(&self.bot_seen).is_none_or(|seen| seen.elapsed() >= BOT_GONE_AFTER)
     }
 
-    /// A new pair for two different certificate hashes (validated by the caller). A pair for the
-    /// same two hashes is replaced: its token stops working and its session ends.
-    pub fn create_pair(&self, a: String, b: String) -> Result<String, PairError> {
+    /// A new pair for two different certificate hashes (validated by the caller); `plugin_data`
+    /// for `use = plugin_data`. A pair for the same two hashes is replaced: its token stops
+    /// working and its session ends.
+    pub fn create_pair(
+        &self,
+        a: String,
+        b: String,
+        plugin_data: bool,
+    ) -> Result<String, PairError> {
         if !self.pair_rate.allow() {
             return Err(PairError::RateLimited);
         }
@@ -401,6 +416,7 @@ impl Relay {
             sha256(token.as_bytes()),
             Pair {
                 hashes: [a, b],
+                plugin_data,
                 expires_at: Instant::now() + ttl,
                 bound: [false, false],
                 session: None,
@@ -470,13 +486,14 @@ impl Relay {
         pair.bound[side] = true;
         pair.session = Some(id.clone());
         pair.waiting = Some(tx);
-        Ok(Bind::First {
+        Ok(Bind::First(FirstSide {
             key,
             id,
+            plugin_data: pair.plugin_data,
             expires_at: pair.expires_at,
             partner: rx,
             end: pair.end.subscribe(),
-        })
+        }))
     }
 
     /// Takes over an authenticated link whose first control message was `bind_message`.
@@ -491,7 +508,9 @@ impl Relay {
         if self.bot_gone() {
             return self.refuse(link, Refusal::BotGone, hash, ip).await;
         }
-        if !self.uses.screen_share {
+        // The registry checks the use of the broadcast the token belongs to; with no broadcast
+        // use on there is nothing to look up.
+        if !self.uses.screen_share && !self.uses.plugin_data {
             return self.refuse(link, Refusal::UseNotAllowed, hash, ip).await;
         }
         match role {
@@ -538,36 +557,29 @@ impl Relay {
                     link.close().await;
                 }
             }
-            Ok(Bind::First {
-                key,
-                id,
-                expires_at,
-                partner,
-                end,
-            }) => {
-                tracing::debug!(session = %id, peer = &hash[..8], "bound first side");
-                self.wait_for_partner(link, key, id, expires_at, partner, end)
-                    .await;
+            Ok(Bind::First(first)) => {
+                tracing::debug!(session = %first.id, peer = &hash[..8], "bound first side");
+                self.wait_for_partner(link, first).await;
             }
         }
     }
 
-    async fn wait_for_partner(
-        &self,
-        mut link: Link,
-        key: [u8; 32],
-        id: String,
-        expires_at: Instant,
-        partner: oneshot::Receiver<Link>,
-        mut end: watch::Receiver<Option<EndReason>>,
-    ) {
+    async fn wait_for_partner(&self, mut link: Link, first: FirstSide) {
+        let FirstSide {
+            key,
+            id,
+            plugin_data,
+            expires_at,
+            partner,
+            mut end,
+        } = first;
         if link.send_control(r#"{"v":1,"t":"waiting"}"#).await.is_err() {
             self.forget(&key);
             return;
         }
         tokio::select! {
             other = partner => match other {
-                Ok(other) => self.run_session(key, id, link, other, end).await,
+                Ok(other) => self.run_session(key, id, plugin_data, link, other, end).await,
                 Err(_) => link.close().await,
             },
             () = sleep_until(expires_at.into()) => {
@@ -597,6 +609,7 @@ impl Relay {
         &self,
         key: [u8; 32],
         id: String,
+        plugin_data: bool,
         mut first: Link,
         mut second: Link,
         mut end: watch::Receiver<Option<EndReason>>,
@@ -615,8 +628,8 @@ impl Relay {
             EndReason::Closed
         } else {
             tokio::select! {
-                r = self.pump(&mut a_rx, &mut b_tx, &stats[0], started, &last_packet) => r,
-                r = self.pump(&mut b_rx, &mut a_tx, &stats[1], started, &last_packet) => r,
+                r = self.pump(&mut a_rx, &mut b_tx, &stats[0], plugin_data, started, &last_packet) => r,
+                r = self.pump(&mut b_rx, &mut a_tx, &stats[1], plugin_data, started, &last_packet) => r,
                 r = self.watch(started, &last_packet, &mut end) => r,
             }
         };
@@ -626,6 +639,7 @@ impl Relay {
         let [ab, ba] = &stats;
         tracing::info!(
             session = %id,
+            plugin_data,
             transports = %transports,
             duration_s = started.elapsed().as_secs(),
             bytes_ab = ab.bytes.load(Ordering::Relaxed),
@@ -636,16 +650,23 @@ impl Relay {
         );
     }
 
-    /// Copies packets one way, unchanged, within the session and total bandwidth limits.
+    /// Copies packets one way, unchanged, within the session and total bandwidth limits. For
+    /// plugin data the sending side is capped at `max_kbps_per_sender`, and its packets only get
+    /// spare bandwidth within the plugin-data share (spec 09 FR-9.85, FR-9.86).
     async fn pump(
         &self,
         rx: &mut LinkRx,
         tx: &mut LinkTx,
         stats: &Direction,
+        plugin_data: bool,
         started: Instant,
         last_packet: &AtomicU64,
     ) -> EndReason {
-        let mut bucket = TokenBucket::new(mbit_to_bytes(self.limits.session_mbit));
+        let mut bucket = TokenBucket::new(if plugin_data {
+            kbit_to_bytes(self.plugin_data.max_kbps_per_sender)
+        } else {
+            mbit_to_bytes(self.limits.session_mbit)
+        });
         loop {
             let Some(packet) = rx.recv().await else {
                 return EndReason::Closed;
@@ -654,7 +675,13 @@ impl Relay {
             let millis = u64::try_from(now.duration_since(started).as_millis()).unwrap_or(u64::MAX);
             last_packet.store(millis, Ordering::Relaxed);
             let len = packet.len();
-            if !bucket.take(len, now) || !lock(&self.total).take(len, now) {
+            let passed = bucket.take(len, now)
+                && if plugin_data {
+                    self.bandwidth.spend_plugin_data(len, now).is_ok()
+                } else {
+                    lock(&self.bandwidth.total).take(len, now)
+                };
+            if !passed {
                 stats.dropped.fetch_add(1, Ordering::Relaxed);
                 continue;
             }
@@ -784,6 +811,7 @@ pub async fn housekeeping(relay: Arc<Relay>) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::broadcast::BroadcastUse;
 
     const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -835,14 +863,14 @@ mod tests {
     #[test]
     fn only_the_pair_may_bind() {
         let relay = relay("");
-        let token = relay.create_pair(A.into(), B.into()).ok().unwrap();
+        let token = relay.create_pair(A.into(), B.into(), false).ok().unwrap();
         assert!(relay.allowed(A) && relay.allowed(B) && !relay.allowed(C));
         assert_eq!(refusal(relay.bind(&token, C)), Refusal::NotAllowed);
         assert_eq!(
             refusal(relay.bind(&"x".repeat(43), A)),
             Refusal::UnknownToken
         );
-        assert!(matches!(relay.bind(&token, A), Ok(Bind::First { .. })));
+        assert!(matches!(relay.bind(&token, A), Ok(Bind::First(_))));
         // The same side twice is refused.
         assert_eq!(refusal(relay.bind(&token, A)), Refusal::NotAllowed);
         assert_eq!(relay.sessions(), 1);
@@ -853,8 +881,8 @@ mod tests {
     #[test]
     fn new_pair_and_drop_peer_revoke() {
         let relay = relay("");
-        let old = relay.create_pair(A.into(), B.into()).ok().unwrap();
-        let new = relay.create_pair(B.into(), A.into()).ok().unwrap();
+        let old = relay.create_pair(A.into(), B.into(), false).ok().unwrap();
+        let new = relay.create_pair(B.into(), A.into(), false).ok().unwrap();
         assert_eq!(refusal(relay.bind(&old, A)), Refusal::UnknownToken);
         relay.drop_peer(B);
         assert_eq!(refusal(relay.bind(&new, A)), Refusal::UnknownToken);
@@ -864,10 +892,13 @@ mod tests {
     #[test]
     fn broadcasts_join_the_allowlist_and_leave_with_drop_peer() {
         let relay = relay("max_sessions = 1\nmax_sessions_per_peer = 1");
-        let ab = relay.create_pair(A.into(), B.into()).ok().unwrap();
+        let ab = relay.create_pair(A.into(), B.into(), false).ok().unwrap();
         assert!(relay.bind(&ab, A).is_ok());
         // A full relay and a busy peer still get broadcasts (spec 07 FR-7.46).
-        let (id, _) = relay.broadcasts.create(A.into(), 25).unwrap();
+        let (id, _) = relay
+            .broadcasts
+            .create(A.into(), 25, BroadcastUse::ScreenShare)
+            .unwrap();
         relay.broadcasts.admit(id, C.into()).unwrap();
         assert!(relay.allowed(C));
         relay.drop_peer(A);
@@ -878,19 +909,19 @@ mod tests {
     #[test]
     fn session_limits() {
         let relay = relay("max_sessions = 2\nmax_sessions_per_peer = 1");
-        let ab = relay.create_pair(A.into(), B.into()).ok().unwrap();
-        let ac = relay.create_pair(A.into(), C.into()).ok().unwrap();
+        let ab = relay.create_pair(A.into(), B.into(), false).ok().unwrap();
+        let ac = relay.create_pair(A.into(), C.into(), false).ok().unwrap();
         let bind = relay.bind(&ab, A);
         assert!(bind.is_ok());
         assert_eq!(refusal(relay.bind(&ac, C)), Refusal::PeerLimit);
         let relay = self::relay("max_sessions = 1");
-        let ab = relay.create_pair(A.into(), B.into()).ok().unwrap();
-        let bc = relay.create_pair(B.into(), C.into()).ok().unwrap();
+        let ab = relay.create_pair(A.into(), B.into(), false).ok().unwrap();
+        let bc = relay.create_pair(B.into(), C.into(), false).ok().unwrap();
         let bind = relay.bind(&ab, A);
         assert!(bind.is_ok());
         assert_eq!(refusal(relay.bind(&bc, C)), Refusal::RelayFull);
         assert!(matches!(
-            relay.create_pair(A.into(), C.into()),
+            relay.create_pair(A.into(), C.into(), false),
             Err(PairError::RelayFull)
         ));
     }
@@ -898,7 +929,7 @@ mod tests {
     #[test]
     fn bot_gone_refuses_binds() {
         let relay = relay("");
-        let token = relay.create_pair(A.into(), B.into()).ok().unwrap();
+        let token = relay.create_pair(A.into(), B.into(), false).ok().unwrap();
         *lock(&relay.bot_seen) = Some(Instant::now() - BOT_GONE_AFTER);
         assert_eq!(refusal(relay.bind(&token, A)), Refusal::BotGone);
     }
@@ -906,9 +937,9 @@ mod tests {
     #[test]
     fn pairs_per_minute() {
         let relay = relay("pairs_per_min = 1");
-        assert!(relay.create_pair(A.into(), B.into()).is_ok());
+        assert!(relay.create_pair(A.into(), B.into(), false).is_ok());
         assert!(matches!(
-            relay.create_pair(A.into(), C.into()),
+            relay.create_pair(A.into(), C.into(), false),
             Err(PairError::RateLimited)
         ));
     }

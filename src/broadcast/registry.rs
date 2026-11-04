@@ -1,4 +1,6 @@
 //! The broadcasts the bot created, their publisher and viewer tokens, and their limits.
+//! Screen-share and plugin-data broadcasts (spec 09 FR-9.84, FR-9.86) are counted and capped
+//! separately, and a link only binds while the broadcast's use is switched on.
 //!
 //! Tokens are kept only as SHA-256 hashes, as for pairs. A broadcast or a viewer that is removed
 //! signals its `end` watch, so a bound link can close (and, for a viewer, tell the publisher).
@@ -11,7 +13,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
 use super::session::{Session, Subscriber};
-use crate::config::Limits;
+use crate::config::{Config, PluginData, Uses};
 use crate::limits::lock;
 use crate::relay::Refusal;
 use crate::{base64url, random, sha256};
@@ -52,9 +54,26 @@ pub enum BroadcastEnd {
     Idle,
 }
 
+/// What a broadcast carries; it decides the limits and which units its publisher may send.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BroadcastUse {
+    ScreenShare,
+    PluginData,
+}
+
+impl BroadcastUse {
+    /// The name in `[uses]` and in the API.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::ScreenShare => "screen_share",
+            Self::PluginData => "plugin_data",
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum CreateError {
-    /// `max_broadcasts` broadcasts exist already (or broadcasts are off).
+    /// The use's `max_broadcasts` broadcasts exist already (or its broadcasts are off).
     RelayFull,
 }
 
@@ -87,6 +106,7 @@ impl Viewer {
 
 /// One broadcast. `publisher_bound` is set once the publisher link is bound.
 struct Broadcast {
+    use_: BroadcastUse,
     publisher: String,
     publisher_token: [u8; 32],
     expires_at: Instant,
@@ -133,11 +153,14 @@ pub struct Registry {
     token_ttl: Duration,
     in_mbit: u32,
     out_mbit: u32,
+    uses: Uses,
+    plugin_data: PluginData,
     broadcasts: Mutex<HashMap<BroadcastId, Broadcast>>,
 }
 
 impl Registry {
-    pub fn new(limits: &Limits) -> Self {
+    pub fn new(config: &Config) -> Self {
+        let limits = &config.limits;
         Self {
             max_broadcasts: limits.max_broadcasts as usize,
             // The config validates the range; the fallback is never used.
@@ -145,11 +168,14 @@ impl Registry {
             token_ttl: Duration::from_secs(limits.token_ttl_s.into()),
             in_mbit: limits.broadcast_in_mbit,
             out_mbit: limits.broadcast_out_mbit,
+            uses: config.uses,
+            plugin_data: config.plugin_data,
             broadcasts: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Viewers per broadcast as announced to clients; `None` when broadcasts are off.
+    /// Viewers per broadcast as announced to clients; `None` when screen-share broadcasts are
+    /// off.
     pub fn max_viewers(&self) -> Option<u16> {
         (self.max_broadcasts > 0).then_some(self.max_viewers)
     }
@@ -160,14 +186,20 @@ impl Registry {
     }
 
     /// A new broadcast for `publisher` (a validated certificate hash) with at most `max_viewers`
-    /// viewers, capped by the relay's own limit. Returns its id and the publisher's token.
+    /// viewers, capped by the relay's own limit. Returns its id and the publisher's token. The
+    /// caller checked that the use is switched on.
     pub fn create(
         &self,
         publisher: String,
         max_viewers: u16,
+        use_: BroadcastUse,
     ) -> Result<(BroadcastId, String), CreateError> {
         let mut broadcasts = lock(&self.broadcasts);
-        if broadcasts.len() >= self.max_broadcasts {
+        let max = match use_ {
+            BroadcastUse::ScreenShare => self.max_broadcasts,
+            BroadcastUse::PluginData => self.plugin_data.max_broadcasts as usize,
+        };
+        if broadcasts.values().filter(|b| b.use_ == use_).count() >= max {
             return Err(CreateError::RelayFull);
         }
         let id = loop {
@@ -177,9 +209,14 @@ impl Registry {
             }
         };
         let token = base64url(&random::<32>());
+        let session = match use_ {
+            BroadcastUse::ScreenShare => Session::new(self.in_mbit, self.out_mbit),
+            BroadcastUse::PluginData => Session::plugin_data(&self.plugin_data, self.out_mbit),
+        };
         broadcasts.insert(
             id,
             Broadcast {
+                use_,
                 publisher,
                 publisher_token: sha256(token.as_bytes()),
                 expires_at: Instant::now() + self.token_ttl,
@@ -187,7 +224,7 @@ impl Registry {
                 max_viewers: max_viewers.min(self.max_viewers),
                 viewers: HashMap::new(),
                 end: watch::channel(None).0,
-                session: Arc::new(Session::new(self.in_mbit, self.out_mbit)),
+                session: Arc::new(session),
                 next_slot: 0,
             },
         );
@@ -263,6 +300,9 @@ impl Registry {
             .iter_mut()
             .find(|(_, b)| b.publisher_token == key)
             .ok_or(Refusal::UnknownToken)?;
+        if !self.uses.allows(broadcast.use_.name()) {
+            return Err(Refusal::UseNotAllowed);
+        }
         if broadcast.publisher != hash || broadcast.publisher_bound {
             return Err(Refusal::NotAllowed);
         }
@@ -285,6 +325,9 @@ impl Registry {
             .iter_mut()
             .find(|(_, b)| b.viewers.values().any(|v| v.token == key))
             .ok_or(Refusal::UnknownToken)?;
+        if !self.uses.allows(broadcast.use_.name()) {
+            return Err(Refusal::UseNotAllowed);
+        }
         let viewer = broadcast
             .viewers
             .get(hash)
@@ -373,6 +416,9 @@ mod tests {
     use super::*;
     use crate::config::Config;
 
+    const SCREEN: BroadcastUse = BroadcastUse::ScreenShare;
+    const PLUGIN: BroadcastUse = BroadcastUse::PluginData;
+
     const P: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const V: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const W: &str = "cccccccccccccccccccccccccccccccccccccccc";
@@ -380,7 +426,7 @@ mod tests {
     fn registry(limits: &str) -> Registry {
         let config =
             Config::parse(&format!("public_host = \"relay.test\"\n[limits]\n{limits}")).unwrap();
-        Registry::new(&config.limits)
+        Registry::new(&config)
     }
 
     fn viewer_end(
@@ -414,24 +460,30 @@ mod tests {
     fn create_respects_max_broadcasts() {
         let registry = registry("max_broadcasts = 2");
         assert_eq!(registry.max_viewers(), Some(25));
-        let (a, token) = registry.create(P.into(), 25).unwrap();
+        let (a, token) = registry.create(P.into(), 25, SCREEN).unwrap();
         assert_eq!(token.len(), 43);
-        let (b, _) = registry.create(P.into(), 25).unwrap();
+        let (b, _) = registry.create(P.into(), 25, SCREEN).unwrap();
         assert_ne!(a, b);
-        assert_eq!(registry.create(V.into(), 25), Err(CreateError::RelayFull));
+        assert_eq!(
+            registry.create(V.into(), 25, SCREEN),
+            Err(CreateError::RelayFull)
+        );
         registry.delete(a);
-        assert!(registry.create(V.into(), 25).is_ok());
+        assert!(registry.create(V.into(), 25, SCREEN).is_ok());
         assert_eq!(registry.count(), 2);
 
         let off = self::registry("max_broadcasts = 0");
         assert_eq!(off.max_viewers(), None);
-        assert_eq!(off.create(P.into(), 25), Err(CreateError::RelayFull));
+        assert_eq!(
+            off.create(P.into(), 25, SCREEN),
+            Err(CreateError::RelayFull)
+        );
     }
 
     #[test]
     fn admit_caps_viewers_at_the_smaller_limit() {
         let registry = registry("max_viewers_per_broadcast = 2");
-        let (id, _) = registry.create(P.into(), 10).unwrap();
+        let (id, _) = registry.create(P.into(), 10, SCREEN).unwrap();
         assert_eq!(registry.admit(id, P.into()), Err(AdmitError::Publisher));
         assert_eq!(registry.admit(id, V.into()).unwrap().len(), 43);
         assert!(registry.admit(id, W.into()).is_ok());
@@ -447,7 +499,7 @@ mod tests {
         registry.remove_viewer(id, W);
         assert!(registry.admit(id, third).is_ok());
 
-        let (small, _) = registry.create(P.into(), 1).unwrap();
+        let (small, _) = registry.create(P.into(), 1, SCREEN).unwrap();
         assert!(registry.admit(small, V.into()).is_ok());
         assert_eq!(
             registry.admit(small, W.into()),
@@ -462,7 +514,7 @@ mod tests {
     #[test]
     fn expired_viewer_tokens_free_their_seat() {
         let registry = registry("max_viewers_per_broadcast = 1");
-        let (id, _) = registry.create(P.into(), 1).unwrap();
+        let (id, _) = registry.create(P.into(), 1, SCREEN).unwrap();
         registry.admit(id, V.into()).unwrap();
         lock(&registry.broadcasts)
             .get_mut(&id)
@@ -478,7 +530,7 @@ mod tests {
     #[test]
     fn removals_signal_the_links() {
         let registry = registry("");
-        let (id, _) = registry.create(P.into(), 25).unwrap();
+        let (id, _) = registry.create(P.into(), 25, SCREEN).unwrap();
         registry.admit(id, V.into()).unwrap();
         registry.admit(id, W.into()).unwrap();
         let v = viewer_end(&registry, id, V);
@@ -502,8 +554,8 @@ mod tests {
     #[test]
     fn drop_peer_ends_its_broadcasts_and_views() {
         let registry = registry("");
-        let (own, _) = registry.create(P.into(), 25).unwrap();
-        let (other, _) = registry.create(V.into(), 25).unwrap();
+        let (own, _) = registry.create(P.into(), 25, SCREEN).unwrap();
+        let (other, _) = registry.create(V.into(), 25, SCREEN).unwrap();
         registry.admit(own, W.into()).unwrap();
         registry.admit(other, P.into()).unwrap();
         let own_end = broadcast_end(&registry, own);
@@ -522,7 +574,7 @@ mod tests {
     #[test]
     fn sweep_forgets_unused_broadcasts() {
         let registry = registry("");
-        let (id, _) = registry.create(P.into(), 25).unwrap();
+        let (id, _) = registry.create(P.into(), 25, SCREEN).unwrap();
         registry.admit(id, V.into()).unwrap();
         let end = broadcast_end(&registry, id);
         registry.sweep(Instant::now());
@@ -535,7 +587,7 @@ mod tests {
     #[test]
     fn sweep_keeps_bound_publishers_and_viewers() {
         let registry = registry("");
-        let (id, _) = registry.create(P.into(), 25).unwrap();
+        let (id, _) = registry.create(P.into(), 25, SCREEN).unwrap();
         registry.admit(id, V.into()).unwrap();
         registry.admit(id, W.into()).unwrap();
         {
@@ -552,7 +604,7 @@ mod tests {
     #[test]
     fn binds_give_unique_slots_and_survive_re_admission() {
         let registry = registry("");
-        let (id, token) = registry.create(P.into(), 25).unwrap();
+        let (id, token) = registry.create(P.into(), 25, SCREEN).unwrap();
         assert_eq!(
             registry.bind_publisher(&token, V).err(),
             Some(Refusal::NotAllowed)
@@ -586,5 +638,55 @@ mod tests {
         // Bound sides survive the sweep.
         registry.sweep(Instant::now() + Duration::from_secs(121));
         assert_eq!(registry.count(), 1);
+    }
+
+    #[test]
+    fn each_use_has_its_own_broadcast_cap() {
+        let registry = registry(
+            "max_broadcasts = 1\n[uses]\nplugin_data = true\n[plugin_data]\nmax_broadcasts = 2",
+        );
+        assert!(registry.create(P.into(), 25, SCREEN).is_ok());
+        assert_eq!(
+            registry.create(V.into(), 25, SCREEN),
+            Err(CreateError::RelayFull)
+        );
+        assert!(registry.create(P.into(), 8, PLUGIN).is_ok());
+        assert!(registry.create(V.into(), 8, PLUGIN).is_ok());
+        assert_eq!(
+            registry.create(W.into(), 8, PLUGIN),
+            Err(CreateError::RelayFull)
+        );
+        assert_eq!(registry.count(), 3);
+
+        // Screen sharing off does not stop plugin-data broadcasts.
+        let plugins_only =
+            self::registry("max_broadcasts = 0\n[uses]\nscreen_share = false\nplugin_data = true");
+        assert!(plugins_only.create(P.into(), 8, PLUGIN).is_ok());
+    }
+
+    #[test]
+    fn a_link_binds_only_while_its_use_is_on() {
+        // Broadcasts that exist when the use is off can only come from an older config; the
+        // check keeps a bind from carrying a use the operator did not allow.
+        let registry = registry("[uses]\nscreen_share = false");
+        let (id, token) = registry.create(P.into(), 25, SCREEN).unwrap();
+        let viewer = registry.admit(id, V.into()).unwrap();
+        assert_eq!(
+            registry.bind_publisher(&token, P).err(),
+            Some(Refusal::UseNotAllowed)
+        );
+        assert_eq!(
+            registry.bind_viewer(&viewer, V).err(),
+            Some(Refusal::UseNotAllowed)
+        );
+        let (_, plugin) = registry.create(P.into(), 8, PLUGIN).unwrap();
+        assert_eq!(
+            registry.bind_publisher(&plugin, P).err(),
+            Some(Refusal::UseNotAllowed)
+        );
+
+        let on = self::registry("[uses]\nplugin_data = true");
+        let (_, plugin) = on.create(P.into(), 8, PLUGIN).unwrap();
+        assert!(on.bind_publisher(&plugin, P).is_ok());
     }
 }

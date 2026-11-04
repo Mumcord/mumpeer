@@ -13,7 +13,7 @@ use tokio::sync::Semaphore;
 use tokio::time::timeout;
 use tokio_rustls::TlsAcceptor;
 
-use crate::broadcast::{AdmitError, BroadcastId, CreateError};
+use crate::broadcast::{AdmitError, BroadcastId, BroadcastUse, CreateError};
 use crate::config::ApiSecret;
 use crate::config::Uses;
 use crate::limits::log_prefix;
@@ -300,7 +300,8 @@ fn route(head: &Head, body: &[u8], relay: &Relay) -> Response {
             if !allowed {
                 return Response::code(403, "use_not_allowed");
             }
-            match relay.create_pair(a, b) {
+            let plugin_data = request.r#use.as_deref() == Some("plugin_data");
+            match relay.create_pair(a, b, plugin_data) {
                 Ok(token) => Response::json(
                     201,
                     json!({ "tok": token, "expires_in": relay.token_ttl_s() }),
@@ -340,15 +341,18 @@ fn create_broadcast(body: &[u8], relay: &Relay) -> Response {
     if request.max_viewers == 0 {
         return Response::code(400, "bad_request");
     }
-    let allowed = match request.r#use.as_deref() {
-        None | Some("screen_share") => relay.uses.screen_share,
-        Some("plugin_data") => relay.uses.plugin_data,
+    let use_ = match request.r#use.as_deref() {
+        None | Some("screen_share") => BroadcastUse::ScreenShare,
+        Some("plugin_data") => BroadcastUse::PluginData,
         Some(_) => return Response::code(400, "bad_request"),
     };
-    if !allowed {
+    if !relay.uses.allows(use_.name()) {
         return Response::code(403, "use_not_allowed");
     }
-    match relay.broadcasts.create(publisher, request.max_viewers) {
+    match relay
+        .broadcasts
+        .create(publisher, request.max_viewers, use_)
+    {
         Ok((id, token)) => Response::json(
             201,
             json!({ "id": id.to_string(), "tok": token, "expires_in": relay.token_ttl_s() }),
@@ -784,7 +788,7 @@ mod tests {
     async fn delete_peer_and_unknown_routes() {
         let relay = relay();
         relay
-            .create_pair("a".repeat(40), "b".repeat(40))
+            .create_pair("a".repeat(40), "b".repeat(40), false)
             .ok()
             .unwrap();
         let out = request(
