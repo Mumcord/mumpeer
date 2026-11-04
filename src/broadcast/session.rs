@@ -20,7 +20,7 @@ use tokio::time::timeout;
 
 use super::control::{
     Assembler, Content, ControlKind, ENCRYPTION_OVERHEAD, HEADER_LEN, Header, MAX_DATA_PAYLOAD,
-    MAX_KEY_BODY, Unit,
+    MAX_KEY_BODY, Unit, WANT_LEN,
 };
 use super::queue::{ControlQueue, Queue};
 use super::registry::{BroadcastEnd, BroadcastId};
@@ -35,6 +35,8 @@ const KEYFRAME_PER_SUBSCRIBER: Duration = Duration::from_secs(2);
 const KEYFRAME_PER_BROADCAST: Duration = Duration::from_millis(500);
 /// Control units waiting for the publisher (`keyreq`, `kf`, `gone`).
 const PUBLISHER_CONTROL: usize = 64;
+/// A viewer reports its tile height only on change; more often is dropped (spec 08 FR-8.82).
+const WANT_PER_SUBSCRIBER: Duration = Duration::from_secs(1);
 const GOODBYE_TIMEOUT: Duration = Duration::from_secs(1);
 const READY: &str = r#"{"v":1,"t":"ready"}"#;
 
@@ -43,6 +45,7 @@ pub struct Subscriber {
     pub slot: u16,
     queue: Queue,
     last_keyframe_request: Mutex<Option<Instant>>,
+    last_want: Mutex<Option<Instant>>,
 }
 
 impl Subscriber {
@@ -51,6 +54,7 @@ impl Subscriber {
             slot,
             queue: Queue::default(),
             last_keyframe_request: Mutex::new(None),
+            last_want: Mutex::new(None),
         }
     }
 }
@@ -77,6 +81,12 @@ impl Session {
     /// A screen-share broadcast.
     pub fn new(in_mbit: u32, out_mbit: u32) -> Self {
         Self::with(None, mbit_to_bytes(in_mbit), out_mbit)
+    }
+
+    /// A camera broadcast: like a screen share, but the publisher's upload is capped at
+    /// `camera_max_kbps`.
+    pub fn camera(max_kbps: u32, out_mbit: u32) -> Self {
+        Self::with(None, kbit_to_bytes(max_kbps), out_mbit)
     }
 
     /// A plugin-data broadcast: the publisher is one sender, capped at `max_kbps_per_sender`.
@@ -254,6 +264,20 @@ impl Session {
             Content::Control(ControlKind::Layers) => {
                 let layer = unit.payload().first().copied().unwrap_or(0);
                 from.queue.with(|policy| policy.set_wanted_layer(layer));
+                true
+            }
+            Content::Control(ControlKind::Want) => {
+                // The slot is the relay's to add.
+                if unit.header.payload_len != WANT_LEN {
+                    return false;
+                }
+                let mut last = lock(&from.last_want);
+                if last.is_some_and(|at| now.duration_since(at) < WANT_PER_SUBSCRIBER) {
+                    return true;
+                }
+                *last = Some(now);
+                self.to_publisher
+                    .push(Unit::want(from.slot, unit.payload()));
                 true
             }
             Content::Control(_) => true,
@@ -693,6 +717,72 @@ mod tests {
         assert_eq!(count(&session), 1, "one per 2 s per subscriber");
         session.subscriber_unit(&a, kf(), start + Duration::from_millis(2100));
         assert_eq!(count(&session), 1);
+    }
+
+    #[test]
+    fn want_reaches_the_publisher_with_the_slot_at_most_once_a_second() {
+        let session = Session::camera(2500, 300);
+        let a = session.add(4);
+        let b = session.add(5);
+        let start = Instant::now();
+        let want = |height: u16| control(ControlKind::Want, &height.to_be_bytes());
+        assert!(session.subscriber_unit(&a, want(360), start));
+        let forwarded = pop_publisher(&session).unwrap();
+        assert_eq!(
+            forwarded.header.content,
+            Content::Control(ControlKind::Want)
+        );
+        assert_eq!(forwarded.payload(), [0, 4, 0x01, 0x68]);
+
+        // Excess is dropped, not an error; each subscriber has its own second.
+        assert!(session.subscriber_unit(&a, want(720), start + Duration::from_millis(900)));
+        assert!(session.subscriber_unit(&b, want(180), start + Duration::from_millis(900)));
+        assert_eq!(pop_publisher(&session).unwrap().payload(), [0, 5, 0, 180]);
+        assert!(pop_publisher(&session).is_none());
+        assert!(session.subscriber_unit(&a, want(720), start + Duration::from_millis(1000)));
+        assert_eq!(
+            pop_publisher(&session).unwrap().payload(),
+            [0, 4, 0x02, 0xd0]
+        );
+
+        // A subscriber must not put a slot in front itself.
+        let with_slot = control(ControlKind::Want, &[0, 9, 0x01, 0x68]);
+        assert!(!session.subscriber_unit(&b, with_slot, start + Duration::from_secs(5)));
+        assert!(pop_publisher(&session).is_none());
+    }
+
+    #[test]
+    fn camera_upload_is_capped_at_camera_max_kbps() {
+        let big = |keyframe| {
+            let header = Header {
+                content: Content::Video {
+                    codec: VideoCodec::Av1,
+                    keyframe,
+                    temporal_layer: 0,
+                },
+                key_id: 1,
+                sequence: 1,
+                payload_len: 70_000,
+            };
+            let mut bytes = header.encode().to_vec();
+            bytes.resize(header.unit_len(), 0);
+            Unit::parse(Bytes::from(bytes)).unwrap()
+        };
+        let delivered = |session: Session| {
+            let a = session.add(0);
+            let now = Instant::now();
+            for i in 0..3 {
+                assert!(session.publisher_unit(big(i == 0), &total(), now));
+            }
+            let mut n = 0;
+            while pop(&a.queue).is_some() {
+                n += 1;
+            }
+            n
+        };
+        // 2500 kbit/s allow a burst of one such unit; a screen share's 15 Mbit/s all three.
+        assert_eq!(delivered(Session::camera(2500, 300)), 1);
+        assert_eq!(delivered(Session::new(15, 300)), 3);
     }
 
     #[test]

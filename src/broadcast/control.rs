@@ -18,6 +18,8 @@ pub const MAX_DATA_PAYLOAD: u32 = 1024 * 1024 + ENCRYPTION_OVERHEAD;
 /// The opaque body of a `keyreq` or `key`.
 pub const MAX_KEY_BODY: u32 = 1024;
 pub const SLOT_LEN: u32 = 2;
+/// The tile height in a `want`.
+pub const WANT_LEN: u32 = 2;
 
 const KIND_VIDEO: u8 = 1;
 const KIND_AUDIO: u8 = 2;
@@ -46,6 +48,9 @@ pub enum ControlKind {
     Layers = 4,
     /// Relay → publisher: the subscriber in this slot left.
     Gone = 5,
+    /// Subscriber → publisher: the u16 tile height it draws (spec 08 FR-8.82); the relay
+    /// prepends the slot, like for `keyreq`, and lets at most one per second through.
+    Want = 6,
 }
 
 impl ControlKind {
@@ -56,6 +61,7 @@ impl ControlKind {
             3 => Self::KeyframeRequest,
             4 => Self::Layers,
             5 => Self::Gone,
+            6 => Self::Want,
             _ => return None,
         })
     }
@@ -66,6 +72,8 @@ impl ControlKind {
             Self::KeyframeRequest => (0, 0),
             Self::Layers => (1, 1),
             Self::Gone => (SLOT_LEN, SLOT_LEN),
+            // Bare from the subscriber, with the slot in front towards the publisher.
+            Self::Want => (WANT_LEN, SLOT_LEN + WANT_LEN),
         }
     }
 }
@@ -254,6 +262,11 @@ impl Unit {
         Self::control(ControlKind::KeyframeRequest, &[])
     }
 
+    /// `want` for the publisher: the subscriber's tile height with its slot in front.
+    pub fn want(slot: u16, height: &[u8]) -> Self {
+        Self::control(ControlKind::Want, &[&slot.to_be_bytes(), height])
+    }
+
     pub fn gone(slot: u16) -> Self {
         Self::control(ControlKind::Gone, &[&slot.to_be_bytes()])
     }
@@ -409,6 +422,14 @@ mod tests {
                 Header::control(ControlKind::Gone, 2),
             ),
             (
+                "0103000006000000000000000002",
+                Header::control(ControlKind::Want, 2),
+            ),
+            (
+                "0103000006000000000000000004",
+                Header::control(ControlKind::Want, 4),
+            ),
+            (
                 "010400000003000000070000015e",
                 Header {
                     content: Content::Data,
@@ -438,7 +459,9 @@ mod tests {
             "0101010003020000000100000400", // video codec
             "0102000001020000000200000010", // audio codec
             "0102010003020000000200000010", // audio flags
-            "0103000006000000000000000000", // control type
+            "0103000007000000000000000000", // control type
+            "0103000006000000000000000001", // want of one byte
+            "0103000006000000000000000005", // want over slot and height
             "0103000003010000000000000000", // control with key id
             "0103000003000000000100000000", // control with sequence
             "0103000003000000000000000001", // kf with payload
@@ -471,6 +494,8 @@ mod tests {
         assert_eq!(split_slot(request.payload()), Some((7, &b"pub-key"[..])));
         let gone = Unit::gone(2);
         assert_eq!(hex(&gone.bytes), "01030000050000000000000000020002");
+        let want = Unit::want(3, &360u16.to_be_bytes());
+        assert_eq!(hex(&want.bytes), "010300000600000000000000000400030168");
         assert_eq!(Unit::key(b"x").header, Header::control(ControlKind::Key, 1));
         assert!(Unit::parse(Unit::keyframe_request().bytes).is_ok());
         assert!(Unit::parse(Bytes::from(unhex("0103000004000000000000000001"))).is_err());

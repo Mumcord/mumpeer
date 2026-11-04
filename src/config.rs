@@ -52,6 +52,8 @@ pub struct Uses {
     pub images: bool,
     pub files: bool,
     pub screen_share: bool,
+    /// Camera broadcasts only; a pair never carries a camera.
+    pub camera: bool,
     pub plugin_data: bool,
 }
 
@@ -61,13 +63,15 @@ impl Default for Uses {
             images: true,
             files: true,
             screen_share: true,
+            camera: true,
             plugin_data: false,
         }
     }
 }
 
 impl Uses {
-    pub const NAMES: [&'static str; 4] = ["images", "files", "screen_share", "plugin_data"];
+    pub const NAMES: [&'static str; 5] =
+        ["images", "files", "screen_share", "camera", "plugin_data"];
 
     /// The enabled uses by their API names, in a fixed order.
     pub fn enabled(&self) -> Vec<&'static str> {
@@ -83,13 +87,15 @@ impl Uses {
             "images" => self.images,
             "files" => self.files,
             "screen_share" => self.screen_share,
+            "camera" => self.camera,
             "plugin_data" => self.plugin_data,
             _ => false,
         }
     }
 
     /// A pair without a `use` is only allowed when the three original uses are on. It never
-    /// covers `plugin_data`, which must always be requested by name.
+    /// covers `plugin_data`, which must always be requested by name, nor `camera`, which is not a
+    /// pair use at all.
     pub fn all(&self) -> bool {
         self.images && self.files && self.screen_share
     }
@@ -138,12 +144,16 @@ pub struct Limits {
     pub pairs_per_min: u32,
     /// 0 turns screen-share broadcasts off.
     pub max_broadcasts: u32,
-    /// Announced to clients as `bc`, a u16 on the wire.
+    /// 0 turns camera broadcasts off; counted separately from `max_broadcasts`.
+    pub max_camera_broadcasts: u32,
+    /// Announced to clients as `bc`, a u16 on the wire; applies to cameras too.
     pub max_viewers_per_broadcast: u32,
     /// The publisher's upload of one broadcast.
     pub broadcast_in_mbit: u32,
     /// All copies of one broadcast together; also counted against `total_mbit`.
     pub broadcast_out_mbit: u32,
+    /// The publisher's upload of one camera broadcast, instead of `broadcast_in_mbit`.
+    pub camera_max_kbps: u32,
 }
 
 impl Default for Limits {
@@ -160,9 +170,11 @@ impl Default for Limits {
             failed_per_ip_per_min: 10,
             pairs_per_min: 120,
             max_broadcasts: 4,
+            max_camera_broadcasts: 18,
             max_viewers_per_broadcast: 25,
             broadcast_in_mbit: 15,
             broadcast_out_mbit: 300,
+            camera_max_kbps: 2500,
         }
     }
 }
@@ -213,6 +225,7 @@ impl Config {
             ("max_viewers_per_broadcast", l.max_viewers_per_broadcast),
             ("broadcast_in_mbit", l.broadcast_in_mbit),
             ("broadcast_out_mbit", l.broadcast_out_mbit),
+            ("camera_max_kbps", l.camera_max_kbps),
         ];
         for (name, value) in must_be_positive {
             if value == 0 {
@@ -356,6 +369,8 @@ mod tests {
             ),
             (4, 25, 15, 300)
         );
+        assert_eq!((l.max_camera_broadcasts, l.camera_max_kbps), (18, 2500));
+        assert!(config.uses.camera);
     }
 
     #[test]
@@ -382,15 +397,24 @@ mod tests {
         assert!(limit("max_viewers_per_broadcast = 65535").is_ok());
         assert!(limit("broadcast_in_mbit = 0").is_err());
         assert!(limit("broadcast_out_mbit = 0").is_err());
+        assert!(limit("max_camera_broadcasts = 0").is_ok());
+        assert!(limit("camera_max_kbps = 0").is_err());
     }
 
     #[test]
     fn uses_default_to_all_and_can_be_disabled() {
         let config = Config::parse(MINIMAL).unwrap();
-        assert_eq!(config.uses.enabled(), ["images", "files", "screen_share"]);
+        assert_eq!(
+            config.uses.enabled(),
+            ["images", "files", "screen_share", "camera"]
+        );
         let config = Config::parse("public_host = \"a.example\"\n[uses]\nfiles = false").unwrap();
-        assert_eq!(config.uses.enabled(), ["images", "screen_share"]);
+        assert_eq!(config.uses.enabled(), ["images", "screen_share", "camera"]);
         assert!(!config.uses.all());
+        // Cameras are not part of what a pair without `use` needs.
+        let config = Config::parse("public_host = \"a.example\"\n[uses]\ncamera = false").unwrap();
+        assert_eq!(config.uses.enabled(), ["images", "files", "screen_share"]);
+        assert!(config.uses.all());
         assert!(Config::parse("public_host = \"a.example\"\n[uses]\nvideo = true").is_err());
         assert!(Config::parse("public_host = \"a.example\"\n[uses]\nfiles = 1").is_err());
     }
@@ -403,7 +427,7 @@ mod tests {
         let on = Config::parse("public_host = \"a.example\"\n[uses]\nplugin_data = true").unwrap();
         assert_eq!(
             on.uses.enabled(),
-            ["images", "files", "screen_share", "plugin_data"]
+            ["images", "files", "screen_share", "camera", "plugin_data"]
         );
         assert_eq!(on.plugin_data, PluginData::default());
     }
