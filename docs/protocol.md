@@ -221,7 +221,7 @@ offset 1  kind: 1 video,       offset 6   sequence, u32 BE (0 for control)
 offset 2  flags: bit 0 keyframe (video only)
 offset 3  temporal layer 0–3 (video only)
 offset 4  video: codec 1 VP9, 2 AV1 · audio: 3 Opus · data: 0 ·
-          control: 1 keyreq, 2 key, 3 kf, 4 layers, 5 gone
+          control: 1 keyreq, 2 key, 3 kf, 4 layers, 5 gone, 6 want
 ```
 
 A `data` unit (test vector `010400000003000000070000015e`: key id 3, sequence 7, 350 bytes)
@@ -256,10 +256,11 @@ How units travel:
 | `kf` | sub → relay → pub | Empty. Forwarded at most once per 2 s per subscriber and once per 500 ms per broadcast; the relay also sends one when a subscriber's queue overflows or an upload was over its limit |
 | `layers` | sub → relay | One byte: the highest temporal layer (0–3) this subscriber wants; higher layers are not sent to it |
 | `gone` | relay → pub | `slot` of a subscriber that left or was removed, so the publisher can rekey |
+| `want` | sub → relay → pub | Camera tile height. The subscriber sends a u16 (big-endian; 180, 360, 540 or 720); the publisher receives `slot ‖ height` (4 bytes), framed like `keyreq`. Forwarded at most once per second per subscriber; excess is dropped. A subscriber's `want` of any other length closes its link. Test vectors: header `0103000006000000000000000002` (from the subscriber), `0103000006000000000000000004` (to the publisher) |
 
 A slot is unique within its broadcast while its subscriber is bound. A subscriber sending
 media or `data` closes its link; control types that are not its to send are ignored, as is a publisher
-sending `keyreq`, `kf`, `layers` or `gone`.
+sending `keyreq`, `kf`, `layers`, `gone` or `want`.
 
 ### Pacing
 
@@ -272,8 +273,9 @@ policy as Mumcord's direct fan-out):
   layer per 500 ms); after 3 s of keeping up it gets one layer back.
 - At 8 waiting frames the queue is cleared, the subscriber drops to layer 0, gets nothing until
   the next keyframe, and the relay asks the publisher for one.
-- Units the publisher sends above `broadcast_in_mbit` (or above `total_mbit`) are dropped;
-  subscribers then wait for the next keyframe, which the relay requests.
+- Units the publisher sends above `broadcast_in_mbit` (`camera_max_kbps` in a camera broadcast)
+  or above `total_mbit` are dropped; subscribers then wait for the next keyframe, which the
+  relay requests.
 - Copies to subscribers are paced by `broadcast_out_mbit` (all copies of one broadcast) and
   `total_mbit`: a subscriber waits for its share, its queue grows, and it loses layers.
   A unit larger than the burst (a big keyframe) is never cut.

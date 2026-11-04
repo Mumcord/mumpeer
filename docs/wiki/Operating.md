@@ -45,7 +45,8 @@ IP addresses, full certificate hashes, tokens, the secret, packet contents.
   Do not poll it automatically: every authenticated call counts as bot activity, and wrong
   secrets get the caller's address blocked.
   The response includes `uses`, the enabled features from `[uses]`, and `broadcast` with
-  `max_viewers`. `broadcast` is absent when screen sharing is off or `max_broadcasts = 0`.
+  `max_viewers` and `max_camera`. `broadcast` is absent when neither screen-share nor camera
+  broadcasts are possible (each off in `[uses]` or with a limit of 0).
   `plugin_data` (with `max_kbps_per_sender`) is present only when `[uses] plugin_data = true`.
 - Load: `totals` and `dropped` in the log.
 

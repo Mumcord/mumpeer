@@ -33,6 +33,7 @@ api_secret_file = "/run/secrets/mumpeer_api_secret"
 images = true        # full-size image transfers
 files = true         # file transfers
 screen_share = true  # screen sharing
+camera = true        # camera sharing (broadcasts only)
 plugin_data = false  # data of Mumcord plugins, off by default
 
 [plugin_data]        # only used when plugin_data = true
@@ -70,9 +71,11 @@ conn_per_ip_per_min = 20    # new connections per source address
 failed_per_ip_per_min = 10  # then the address is blocked for 10 minutes
 pairs_per_min = 120         # pairs the bot may create
 max_broadcasts = 4          # screen-share broadcasts at once; 0 = off
+max_camera_broadcasts = 18  # camera broadcasts at once; 0 = off
 max_viewers_per_broadcast = 25  # viewers per broadcast
 broadcast_in_mbit = 15      # sharer upload per broadcast
 broadcast_out_mbit = 300    # all copies of one broadcast; counts against total_mbit
+camera_max_kbps = 2500      # sender upload per camera broadcast
 ```
 
 IPv6 sources are counted per /64. Set `total_mbit` below your uplink.
@@ -91,17 +94,20 @@ memory only.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `max_broadcasts` | 4 | Broadcasts at the same time. Above it the API answers `503 relay_full`. `0` turns broadcasts off. |
+| `max_broadcasts` | 4 | Screen-share broadcasts at the same time. Above it the API answers `503 relay_full`. `0` turns them off. |
+| `max_camera_broadcasts` | 18 | Camera broadcasts at the same time, counted separately. `0` turns them off. |
 | `max_viewers_per_broadcast` | 25 | Viewers per broadcast. The bot announces this number to clients; a broadcast never gets more, even if asked. |
 | `broadcast_in_mbit` | 15 | Upload the sharer may send per broadcast. |
 | `broadcast_out_mbit` | 300 | All copies of one broadcast together. Also counted against `total_mbit`. |
+| `camera_max_kbps` | 2500 | Upload the sender may send per camera broadcast; more is dropped. |
 
 Things to know:
 
 - Broadcasts do not count against `max_sessions` or `max_sessions_per_peer`.
-- Broadcasts need `screen_share = true` in `[uses]`. With `screen_share = false` or
-  `max_broadcasts = 0`, `GET /v1/status` has no `broadcast` field and Mumcord offers no
-  broadcast through your relay.
+- Screen-share broadcasts need `screen_share = true` in `[uses]`, camera broadcasts
+  `camera = true`. When neither is possible (off in `[uses]` or a limit of 0),
+  `GET /v1/status` has no `broadcast` field and Mumcord offers no broadcast through your
+  relay.
 - Size your uplink: one full broadcast at the defaults can send up to 300 Mbit/s out. Keep
   `total_mbit` below what your server can really send, and lower `broadcast_out_mbit` or
   `max_viewers_per_broadcast` if needed.

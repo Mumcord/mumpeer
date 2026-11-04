@@ -81,6 +81,7 @@ clients, and the API refuses pairs for a disabled use with `403 use_not_allowed`
 | `images` | `true` | Full-size image transfers |
 | `files` | `true` | File transfers |
 | `screen_share` | `true` | Screen sharing |
+| `camera` | `true` | Camera sharing (camera broadcasts only; not a pair use). Off: `POST /v1/broadcasts` with `use = camera` answers `403 use_not_allowed`. |
 | `plugin_data` | `false` | Data of Mumcord plugins. **Off by default**; a missing key means off. |
 
 ## `[plugin_data]`
@@ -97,7 +98,7 @@ than 0.
 
 ## `[limits]`
 
-All limits are optional. Every value must be greater than 0, except `max_session_s` and `max_broadcasts`.
+All limits are optional. Every value must be greater than 0, except `max_session_s`, `max_broadcasts` and `max_camera_broadcasts`.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
@@ -111,10 +112,12 @@ All limits are optional. Every value must be greater than 0, except `max_session
 | `conn_per_ip_per_min` | `20` | New relay connections per source address per minute. Further ones are refused for the rest of the minute. |
 | `failed_per_ip_per_min` | `10` | Failed handshakes, refused binds or failed API logins per source address per minute. Above it the address is blocked for 10 minutes, for the relay and the API. |
 | `pairs_per_min` | `120` | Pairs the bot may create per minute (`429 rate_limited` above). |
-| `max_broadcasts` | `4` | Screen-share broadcasts at the same time (one upload from the sharer, copied by the relay to every viewer). Above it, `POST /v1/broadcasts` answers `503 relay_full`. `0` turns broadcasts off; `GET /v1/status` then has no `broadcast` field. Broadcasts don't count against `max_sessions` or `max_sessions_per_peer`. |
-| `max_viewers_per_broadcast` | `25` | Viewers per broadcast. The bot announces it to clients; a broadcast never gets more viewers, even if the bot asks for more. At most 65535. |
+| `max_broadcasts` | `4` | Screen-share broadcasts at the same time (one upload from the sharer, copied by the relay to every viewer). Above it, `POST /v1/broadcasts` answers `503 relay_full`. `0` turns screen-share broadcasts off; with camera broadcasts off too, `GET /v1/status` has no `broadcast` field. Broadcasts don't count against `max_sessions` or `max_sessions_per_peer`. |
+| `max_camera_broadcasts` | `18` | Camera broadcasts at the same time, counted separately from `max_broadcasts`. Above it, `POST /v1/broadcasts` with `use = camera` answers `503 relay_full`. `0` turns camera broadcasts off. Reported as `broadcast.max_camera` in `GET /v1/status`. |
+| `max_viewers_per_broadcast` | `25` | Viewers per broadcast, screen shares and cameras alike. The bot announces it to clients; a broadcast never gets more viewers, even if the bot asks for more. At most 65535. |
 | `broadcast_in_mbit` | `15` | Upload of the sharer per broadcast, in Mbit/s. |
 | `broadcast_out_mbit` | `300` | All copies of one broadcast together, in Mbit/s. Also counted against `total_mbit`. |
+| `camera_max_kbps` | `2500` | Upload of the sender per camera broadcast, in kbit/s (instead of `broadcast_in_mbit`). Units above it are dropped. |
 
 IPv6 sources are counted per /64 network, because one host can use a whole /64.
 
@@ -177,7 +180,9 @@ conn_per_ip_per_min = 20
 failed_per_ip_per_min = 10
 pairs_per_min = 120
 max_broadcasts = 4
+max_camera_broadcasts = 18
 max_viewers_per_broadcast = 25
 broadcast_in_mbit = 15
 broadcast_out_mbit = 300
+camera_max_kbps = 2500
 ```

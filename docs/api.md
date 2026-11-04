@@ -55,7 +55,7 @@ Errors carry a JSON body with a machine-readable code:
 | 413 | `too_large` | Body over 4 KiB |
 | 429 | `rate_limited` | More than `pairs_per_min` pairs this minute |
 | 431 | `too_large` | Request head over 8 KiB |
-| 503 | `relay_full` | `max_sessions` reached (pairs) or `max_broadcasts` reached (broadcasts) |
+| 503 | `relay_full` | `max_sessions` reached (pairs) or `max_broadcasts` / `max_camera_broadcasts` reached (broadcasts) |
 
 ## `GET /v1/status`
 
@@ -77,8 +77,8 @@ curl -fsS -H "Authorization: Bearer $SECRET" http://127.0.0.1:7480/v1/status
   "fp": "0b355b90b32dae6e5fe93b59215ab74449e26a695328b27b861cba4f90c16ad5",
   "sessions": 0,
   "max_sessions": 50,
-  "uses": ["images", "files", "screen_share", "plugin_data"],
-  "broadcast": {"max_viewers": 25},
+  "uses": ["images", "files", "screen_share", "camera", "plugin_data"],
+  "broadcast": {"max_viewers": 25, "max_camera": 18},
   "plugin_data": {"max_kbps_per_sender": 512}
 }
 ```
@@ -92,9 +92,9 @@ curl -fsS -H "Authorization: Bearer $SECRET" http://127.0.0.1:7480/v1/status
 | `fp` | SHA-256 of the relay certificate (DER), 64 lowercase hex characters: what clients pin |
 | `sessions` | Pairs with at least one connected side |
 | `max_sessions` | The configured limit |
-| `uses` | The features allowed to use this relay (`[uses]` in the config), any of `images`, `files`, `screen_share`, `plugin_data` (the last one only when the operator turned it on). The bot announces them to clients. |
+| `uses` | The features allowed to use this relay (`[uses]` in the config), any of `images`, `files`, `screen_share`, `camera`, `plugin_data` (the last one only when the operator turned it on). The bot announces them to clients. |
 | `plugin_data` | Present only when `plugin_data` is in `uses`. `max_kbps_per_sender` is the per-sender limit (`[plugin_data]` in the config); the bot announces it to clients. |
-| `broadcast` | Present only when screen-share broadcasts are available (`screen_share` allowed and `max_broadcasts` above 0). `max_viewers` is `max_viewers_per_broadcast`; the bot announces it to clients as `bc`. |
+| `broadcast` | Present only when screen-share broadcasts (`screen_share` allowed and `max_broadcasts` above 0) or camera broadcasts (`camera` allowed and `max_camera_broadcasts` above 0) are available. `max_viewers` is `max_viewers_per_broadcast`; the bot announces it to clients as `bc`. `max_camera` is `max_camera_broadcasts`, or 0 when `camera` is not allowed. |
 
 ## `POST /v1/pairs`
 
@@ -112,7 +112,7 @@ Body:
 | Field | Meaning |
 | --- | --- |
 | `a`, `b` | Mumble certificate hashes of the two users: SHA-1 of the certificate DER, 40 hex characters (any case; stored lowercase). Must differ. |
-| `use` | Optional. What the pair is for: `images`, `files`, `screen_share` or `plugin_data`. A disabled use is refused with `403 use_not_allowed`. Without `use` the pair is only created when `images`, `files` and `screen_share` are enabled; such a pair never carries plugin data. Any other value is `400 bad_request`. |
+| `use` | Optional. What the pair is for: `images`, `files`, `screen_share` or `plugin_data`. A disabled use is refused with `403 use_not_allowed`. `camera` is a broadcast use only and gives `400 bad_request` here. Without `use` the pair is only created when `images`, `files` and `screen_share` are enabled; such a pair never carries plugin data. Any other value is `400 bad_request`. |
 
 `201 Created`:
 
@@ -174,7 +174,7 @@ Body:
 | --- | --- |
 | `publisher` | Mumble certificate hash of the sharer |
 | `max_viewers` | Viewers the sharer wants, 1–65535. The relay caps it at `max_viewers_per_broadcast`. |
-| `use` | Optional. `screen_share` (default) or `plugin_data`. A disabled use is `403 use_not_allowed`, any other value `400 bad_request`. |
+| `use` | Optional. `screen_share` (default; also when missing, so older bots keep working), `camera` or `plugin_data`. A disabled use is `403 use_not_allowed`, any other value `400 bad_request`. Each use has its own cap: `max_broadcasts` for screen shares, `max_camera_broadcasts` for cameras, `plugin_data.max_broadcasts` for plugin data. A camera's upload is capped at `camera_max_kbps`. |
 
 `201 Created`:
 
@@ -189,8 +189,8 @@ Body:
 | `expires_in` | Seconds the sharer has to connect (`token_ttl_s`). A broadcast whose sharer never connects is forgotten after that. |
 
 Errors: `400 bad_request` (malformed hash, `max_viewers` 0 or too big), `403 use_not_allowed`
-(the requested `use` is disabled), `503 relay_full` (`max_broadcasts` broadcasts exist, or
-`max_broadcasts` is 0).
+(the requested `use` is disabled), `503 relay_full` (the cap of the requested use is reached or
+is 0).
 
 ### `POST /v1/broadcasts/{id}/viewers`
 
