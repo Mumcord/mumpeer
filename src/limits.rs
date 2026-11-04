@@ -17,6 +17,11 @@ pub fn mbit_to_bytes(mbit: u32) -> f64 {
     f64::from(mbit) * 125_000.0
 }
 
+/// Bytes per second from kbit/s.
+pub fn kbit_to_bytes(kbit: u32) -> f64 {
+    f64::from(kbit) * 125.0
+}
+
 /// Classic token bucket: `rate` bytes per second, bursts up to 100 ms worth of traffic (at least
 /// 64 KiB, so a single key frame of a screen share is not cut).
 pub struct TokenBucket {
@@ -37,11 +42,15 @@ impl TokenBucket {
         }
     }
 
-    /// Takes `bytes` if available; false means the packet must be dropped.
-    pub fn take(&mut self, bytes: usize, now: Instant) -> bool {
+    fn refill(&mut self, now: Instant) {
         let elapsed = now.saturating_duration_since(self.last).as_secs_f64();
         self.last = now;
         self.tokens = (self.tokens + elapsed * self.rate).min(self.capacity);
+    }
+
+    /// Takes `bytes` if available; false means the packet must be dropped.
+    pub fn take(&mut self, bytes: usize, now: Instant) -> bool {
+        self.refill(now);
         let bytes = bytes as f64;
         if self.tokens >= bytes {
             self.tokens -= bytes;
@@ -57,15 +66,66 @@ impl TokenBucket {
     /// MiB): a unit passes while the bucket is not empty and may leave it in debt. `Err` is the
     /// time until the debt is paid off; the caller either waits that long or drops the unit.
     pub fn spend(&mut self, bytes: usize, now: Instant) -> Result<(), Duration> {
-        let elapsed = now.saturating_duration_since(self.last).as_secs_f64();
-        self.last = now;
-        self.tokens = (self.tokens + elapsed * self.rate).min(self.capacity);
+        self.refill(now);
+        self.check_spend()?;
+        self.tokens -= bytes as f64;
+        Ok(())
+    }
+
+    fn check_spend(&self) -> Result<(), Duration> {
         if self.tokens > 0.0 {
-            self.tokens -= bytes as f64;
             Ok(())
         } else {
             Err(Duration::from_secs_f64(-self.tokens / self.rate + 0.001))
         }
+    }
+
+    /// The lowest priority (plugin data, spec 09 FR-9.85): `bytes` pass only while half the burst
+    /// stays in the bucket for everything else. A unit larger than that waits for a full bucket,
+    /// which only an otherwise idle relay has.
+    fn check_spare(&self, bytes: usize) -> Result<(), Duration> {
+        let need = (bytes as f64 + self.capacity / 2.0).min(self.capacity);
+        if self.tokens >= need {
+            Ok(())
+        } else {
+            Err(Duration::from_secs_f64(
+                (need - self.tokens) / self.rate + 0.001,
+            ))
+        }
+    }
+}
+
+/// The relay-wide budgets: `total` counts every forwarded byte, `plugin_data` the share of it
+/// plugin data may use (`plugin_data.max_share_percent` of `total_mbit`).
+pub struct Bandwidth {
+    pub total: Mutex<TokenBucket>,
+    plugin_data: Mutex<TokenBucket>,
+}
+
+impl Bandwidth {
+    pub fn new(total_mbit: u32, plugin_share_percent: u32) -> Self {
+        let total = mbit_to_bytes(total_mbit);
+        Self {
+            total: Mutex::new(TokenBucket::new(total)),
+            plugin_data: Mutex::new(TokenBucket::new(
+                total * f64::from(plugin_share_percent) / 100.0,
+            )),
+        }
+    }
+
+    /// Plugin data passes within its share and only from spare total bandwidth, so voice and
+    /// media are never held up by it. `Err` is the time until it may try again; nothing is taken
+    /// then.
+    pub fn spend_plugin_data(&self, bytes: usize, now: Instant) -> Result<(), Duration> {
+        let mut total = lock(&self.total);
+        let mut share = lock(&self.plugin_data);
+        total.refill(now);
+        share.refill(now);
+        total.check_spare(bytes)?;
+        share.check_spend()?;
+        total.tokens -= bytes as f64;
+        share.tokens -= bytes as f64;
+        Ok(())
     }
 }
 
@@ -244,6 +304,37 @@ mod tests {
             failed_per_ip_per_min: failed,
             ..Limits::default()
         }
+    }
+
+    #[test]
+    fn plugin_data_gets_only_spare_bandwidth_within_its_share() {
+        // 8 Mbit/s: 1 MB/s with a 100 KB burst; plugin data may use a quarter of it.
+        let bandwidth = Bandwidth::new(8, 25);
+        let start = Instant::now();
+        // Half the burst is kept for other traffic.
+        assert!(bandwidth.spend_plugin_data(40_000, start).is_ok());
+        assert!(bandwidth.spend_plugin_data(20_000, start).is_err());
+        assert!(lock(&bandwidth.total).take(60_000, start));
+        // Media using the total leaves plugin data nothing, however long it waits for its turn.
+        let mut now = start;
+        for _ in 0..100 {
+            now += Duration::from_millis(10);
+            assert!(lock(&bandwidth.total).take(10_000, now));
+            assert!(bandwidth.spend_plugin_data(1_000, now).is_err());
+        }
+        // An idle relay lets it through again, but never past its 250 KB/s share.
+        now += Duration::from_secs(1);
+        let mut passed = 0;
+        for _ in 0..100 {
+            now += Duration::from_millis(10);
+            while bandwidth.spend_plugin_data(1_000, now).is_ok() {
+                passed += 1_000;
+            }
+        }
+        assert!(
+            (240_000..=360_000).contains(&passed),
+            "{passed} bytes in 1 s"
+        );
     }
 
     #[test]
