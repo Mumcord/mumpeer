@@ -89,9 +89,10 @@ one sharer and several viewers instead of a pair; see the
 - **Broadcasts:** one user shares their screen with up to 25 viewers (`max_viewers_per_broadcast`)
   while uploading it only once; the relay makes the copies. Needs `screen_share` allowed and
   `max_broadcasts` above 0. The relay forwards the sharer's video and audio to the admitted
-  viewers without being able to read it. See the
+  viewers without being able to read it. Camera sharing uses the same broadcasts (`camera`
+  allowed, up to `max_camera_broadcasts` cameras, each capped at `camera_max_kbps`). See the
   [wiki](https://github.com/Mumcord/mumpeer/wiki/Configuration#broadcasts).
-- **Allowed uses:** the `[uses]` switches (`images`, `files`, `screen_share`, and `plugin_data` for plugin data, which is off by default) let the operator
+- **Allowed uses:** the `[uses]` switches (`images`, `files`, `screen_share`, `camera`, and `plugin_data` for plugin data, which is off by default) let the operator
   decide which kinds of traffic the relay carries; Mumcord shows disabled uses with a reason.
 - **Strong identity checks:** TLS 1.3 only, a client certificate is mandatory, and clients pin
   the relay's certificate by its SHA-256 fingerprint.
@@ -259,9 +260,11 @@ Defaults are sized for a 2-vCPU VPS with about 50 parallel screen shares:
 | `failed_per_ip_per_min` | 10 | Failed handshakes or API logins per source address and minute; then blocked for 10 minutes |
 | `pairs_per_min` | 120 | Pairs the bot may create per minute |
 | `max_broadcasts` | 4 | Screen-share broadcasts at the same time, 0 = off |
-| `max_viewers_per_broadcast` | 25 | Viewers per broadcast |
+| `max_camera_broadcasts` | 18 | Camera broadcasts at the same time, 0 = off |
+| `max_viewers_per_broadcast` | 25 | Viewers per broadcast (screen shares and cameras) |
 | `broadcast_in_mbit` | 15 | Sharer upload per broadcast |
 | `broadcast_out_mbit` | 300 | All copies of one broadcast; also counts against `total_mbit` |
+| `camera_max_kbps` | 2500 | Sender upload per camera broadcast |
 
 IPv6 sources are counted per /64. When the bot has not called the API for 90 seconds, new
 connections are refused with `bot_gone`, and running sessions end after 60 seconds without

@@ -8,6 +8,15 @@ All notable changes to mumpeer are listed here. The format follows
 
 ### Added
 
+- New allowed use `camera` for Mumcord camera sharing, on by default (`[uses] camera`). The API
+  accepts `use = camera` on `POST /v1/broadcasts` (`403 use_not_allowed` when it is off), and
+  `GET /v1/status` lists `camera` in `uses` and reports `broadcast.max_camera`.
+- Camera limits: `[limits] max_camera_broadcasts` (default 18), counted separately from the
+  screen-share `max_broadcasts`, and `camera_max_kbps` (default 2500) for a camera's upload.
+- New broadcast control message `want` (kind 6): a viewer's tile height, forwarded to the
+  publisher with the viewer's slot in front, at most once per second per viewer.
+- Test environment profile `no-camera`; the `no-broadcast` profile now turns camera broadcasts
+  off too.
 - New allowed use `plugin_data` for Mumcord plugin data, off by default (`[uses] plugin_data`), with
   `[plugin_data]` limits. The API accepts `use = plugin_data` for pairs and broadcasts, and
   `GET /v1/status` reports `plugin_data.max_kbps_per_sender`.
