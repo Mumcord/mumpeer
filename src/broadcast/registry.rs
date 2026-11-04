@@ -58,6 +58,7 @@ pub enum BroadcastEnd {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BroadcastUse {
     ScreenShare,
+    Camera,
     PluginData,
 }
 
@@ -66,6 +67,7 @@ impl BroadcastUse {
     pub fn name(self) -> &'static str {
         match self {
             Self::ScreenShare => "screen_share",
+            Self::Camera => "camera",
             Self::PluginData => "plugin_data",
         }
     }
@@ -149,6 +151,8 @@ pub struct ViewerBind {
 
 pub struct Registry {
     max_broadcasts: usize,
+    max_camera_broadcasts: usize,
+    camera_max_kbps: u32,
     max_viewers: u16,
     token_ttl: Duration,
     in_mbit: u32,
@@ -163,6 +167,8 @@ impl Registry {
         let limits = &config.limits;
         Self {
             max_broadcasts: limits.max_broadcasts as usize,
+            max_camera_broadcasts: limits.max_camera_broadcasts as usize,
+            camera_max_kbps: limits.camera_max_kbps,
             // The config validates the range; the fallback is never used.
             max_viewers: u16::try_from(limits.max_viewers_per_broadcast).unwrap_or(u16::MAX),
             token_ttl: Duration::from_secs(limits.token_ttl_s.into()),
@@ -174,10 +180,23 @@ impl Registry {
         }
     }
 
-    /// Viewers per broadcast as announced to clients; `None` when screen-share broadcasts are
-    /// off.
+    /// Viewers per broadcast as announced to clients; `None` when neither screen-share nor
+    /// camera broadcasts can be created (by limit or by `[uses]`).
     pub fn max_viewers(&self) -> Option<u16> {
-        (self.max_broadcasts > 0).then_some(self.max_viewers)
+        (self.screen_shares_on() || self.max_camera() > 0).then_some(self.max_viewers)
+    }
+
+    /// Camera broadcasts at the same time; 0 when cameras are off.
+    pub fn max_camera(&self) -> usize {
+        if self.uses.camera {
+            self.max_camera_broadcasts
+        } else {
+            0
+        }
+    }
+
+    fn screen_shares_on(&self) -> bool {
+        self.uses.screen_share && self.max_broadcasts > 0
     }
 
     /// Broadcasts that exist right now.
@@ -197,6 +216,7 @@ impl Registry {
         let mut broadcasts = lock(&self.broadcasts);
         let max = match use_ {
             BroadcastUse::ScreenShare => self.max_broadcasts,
+            BroadcastUse::Camera => self.max_camera_broadcasts,
             BroadcastUse::PluginData => self.plugin_data.max_broadcasts as usize,
         };
         if broadcasts.values().filter(|b| b.use_ == use_).count() >= max {
@@ -211,6 +231,7 @@ impl Registry {
         let token = base64url(&random::<32>());
         let session = match use_ {
             BroadcastUse::ScreenShare => Session::new(self.in_mbit, self.out_mbit),
+            BroadcastUse::Camera => Session::camera(self.camera_max_kbps, self.out_mbit),
             BroadcastUse::PluginData => Session::plugin_data(&self.plugin_data, self.out_mbit),
         };
         broadcasts.insert(
@@ -418,6 +439,7 @@ mod tests {
 
     const SCREEN: BroadcastUse = BroadcastUse::ScreenShare;
     const PLUGIN: BroadcastUse = BroadcastUse::PluginData;
+    const CAMERA: BroadcastUse = BroadcastUse::Camera;
 
     const P: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const V: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -472,7 +494,10 @@ mod tests {
         assert!(registry.create(V.into(), 25, SCREEN).is_ok());
         assert_eq!(registry.count(), 2);
 
-        let off = self::registry("max_broadcasts = 0");
+        // Camera broadcasts alone keep `max_viewers` announced.
+        let screen_off = self::registry("max_broadcasts = 0");
+        assert_eq!(screen_off.max_viewers(), Some(25));
+        let off = self::registry("max_broadcasts = 0\nmax_camera_broadcasts = 0");
         assert_eq!(off.max_viewers(), None);
         assert_eq!(
             off.create(P.into(), 25, SCREEN),
@@ -688,5 +713,42 @@ mod tests {
         let on = self::registry("[uses]\nplugin_data = true");
         let (_, plugin) = on.create(P.into(), 8, PLUGIN).unwrap();
         assert!(on.bind_publisher(&plugin, P).is_ok());
+    }
+
+    #[test]
+    fn cameras_have_their_own_cap_and_announcement() {
+        let registry = registry("max_broadcasts = 1\nmax_camera_broadcasts = 2");
+        assert_eq!(registry.max_camera(), 2);
+        assert!(registry.create(P.into(), 25, SCREEN).is_ok());
+        assert!(registry.create(P.into(), 25, CAMERA).is_ok());
+        assert!(registry.create(V.into(), 25, CAMERA).is_ok());
+        assert_eq!(
+            registry.create(W.into(), 25, CAMERA),
+            Err(CreateError::RelayFull)
+        );
+        assert_eq!(
+            registry.create(W.into(), 25, SCREEN),
+            Err(CreateError::RelayFull)
+        );
+        assert_eq!(registry.count(), 3);
+
+        // `max_viewers_per_broadcast` caps cameras too.
+        let capped = self::registry("max_viewers_per_broadcast = 2");
+        let (id, _) = capped.create(P.into(), 25, CAMERA).unwrap();
+        assert!(capped.admit(id, V.into()).is_ok());
+        assert!(capped.admit(id, W.into()).is_ok());
+        assert_eq!(
+            capped.admit(id, "d".repeat(40)),
+            Err(AdmitError::BroadcastFull)
+        );
+
+        let no_camera = self::registry("max_broadcasts = 0\n[uses]\ncamera = false");
+        assert_eq!(no_camera.max_camera(), 0);
+        assert_eq!(no_camera.max_viewers(), None);
+        let (_, token) = no_camera.create(P.into(), 25, CAMERA).unwrap();
+        assert_eq!(
+            no_camera.bind_publisher(&token, P).err(),
+            Some(Refusal::UseNotAllowed)
+        );
     }
 }

@@ -228,7 +228,8 @@ async fn read_head<S: AsyncRead + Unpin>(
 struct PairRequest {
     a: String,
     b: String,
-    /// What the pair is for: `images`, `files`, `screen_share` or `plugin_data`.
+    /// What the pair is for: `images`, `files`, `screen_share` or `plugin_data` (`camera` is a
+    /// broadcast use only).
     #[serde(default)]
     r#use: Option<String>,
 }
@@ -237,7 +238,7 @@ struct PairRequest {
 struct BroadcastRequest {
     publisher: String,
     max_viewers: u16,
-    /// `screen_share` (default) or `plugin_data`.
+    /// `screen_share` (default), `camera` or `plugin_data`.
     #[serde(default)]
     r#use: Option<String>,
 }
@@ -267,11 +268,13 @@ fn route(head: &Head, body: &[u8], relay: &Relay) -> Response {
                 "max_sessions": relay.max_sessions(),
                 "uses": relay.uses.enabled(),
             });
-            // Absent, not null, when broadcasts are off (spec 07 §6.6).
-            if let Some(max_viewers) = relay.broadcasts.max_viewers()
-                && relay.uses.screen_share
-            {
-                status["broadcast"] = json!({ "max_viewers": max_viewers });
+            // Absent, not null, when broadcasts are off (spec 07 §6.6). Cameras alone keep it,
+            // because clients need `bc` for camera sharing too (spec 08 FR-8.2).
+            if let Some(max_viewers) = relay.broadcasts.max_viewers() {
+                status["broadcast"] = json!({
+                    "max_viewers": max_viewers,
+                    "max_camera": relay.broadcasts.max_camera(),
+                });
             }
             if relay.uses.plugin_data {
                 status["plugin_data"] =
@@ -291,7 +294,7 @@ fn route(head: &Head, body: &[u8], relay: &Relay) -> Response {
             }
             // Without `use` the pair could serve any feature, so it is only allowed when all are.
             let allowed = match request.r#use.as_deref() {
-                Some(name) if !Uses::NAMES.contains(&name) => {
+                Some(name) if !Uses::NAMES.contains(&name) || name == "camera" => {
                     return Response::code(400, "bad_request");
                 }
                 Some(name) => relay.uses.allows(name),
@@ -343,6 +346,7 @@ fn create_broadcast(body: &[u8], relay: &Relay) -> Response {
     }
     let use_ = match request.r#use.as_deref() {
         None | Some("screen_share") => BroadcastUse::ScreenShare,
+        Some("camera") => BroadcastUse::Camera,
         Some("plugin_data") => BroadcastUse::PluginData,
         Some(_) => return Response::code(400, "bad_request"),
     };
@@ -462,8 +466,14 @@ mod tests {
         assert_eq!(body["boot_id"].as_str().unwrap().len(), 16);
         assert_eq!(body["fp"], "ab".repeat(32));
         assert_eq!(body["max_sessions"], 50);
-        assert_eq!(body["uses"], json!(["images", "files", "screen_share"]));
-        assert_eq!(body["broadcast"], json!({ "max_viewers": 25 }));
+        assert_eq!(
+            body["uses"],
+            json!(["images", "files", "screen_share", "camera"])
+        );
+        assert_eq!(
+            body["broadcast"],
+            json!({ "max_viewers": 25, "max_camera": 18 })
+        );
     }
 
     fn relay_with(config: &str) -> Arc<Relay> {
@@ -500,8 +510,9 @@ mod tests {
     #[tokio::test]
     async fn status_has_no_broadcast_when_they_are_off() {
         for config in [
-            "[uses]\nscreen_share = false",
-            "[limits]\nmax_broadcasts = 0",
+            "[uses]\nscreen_share = false\ncamera = false",
+            "[limits]\nmax_broadcasts = 0\nmax_camera_broadcasts = 0",
+            "[limits]\nmax_broadcasts = 0\n[uses]\ncamera = false",
         ] {
             let relay = relay_with(config);
             let body = json_body(&request(&relay, &authed("GET", "/v1/status", "")).await);
@@ -509,7 +520,76 @@ mod tests {
         }
         let relay = relay_with("[limits]\nmax_viewers_per_broadcast = 9");
         let body = json_body(&request(&relay, &authed("GET", "/v1/status", "")).await);
-        assert_eq!(body["broadcast"], json!({ "max_viewers": 9 }));
+        assert_eq!(
+            body["broadcast"],
+            json!({ "max_viewers": 9, "max_camera": 18 })
+        );
+        // Either kind of broadcast keeps the object; the other one reads as off.
+        let relay = relay_with("[uses]\nscreen_share = false");
+        let body = json_body(&request(&relay, &authed("GET", "/v1/status", "")).await);
+        assert_eq!(
+            body["broadcast"],
+            json!({ "max_viewers": 25, "max_camera": 18 })
+        );
+        let relay = relay_with("[uses]\ncamera = false");
+        let body = json_body(&request(&relay, &authed("GET", "/v1/status", "")).await);
+        assert_eq!(
+            body["broadcast"],
+            json!({ "max_viewers": 25, "max_camera": 0 })
+        );
+    }
+
+    #[tokio::test]
+    async fn camera_broadcasts_are_gated_and_capped() {
+        let p = "a".repeat(40);
+        let camera = |publisher: &str| {
+            authed(
+                "POST",
+                "/v1/broadcasts",
+                &format!(r#"{{"publisher":"{publisher}","max_viewers":25,"use":"camera"}}"#),
+            )
+        };
+
+        let off = relay_with("[uses]\ncamera = false");
+        let body = json_body(&request(&off, &authed("GET", "/v1/status", "")).await);
+        assert_eq!(body["uses"], json!(["images", "files", "screen_share"]));
+        let out = request(&off, &camera(&p)).await;
+        assert!(out.starts_with("HTTP/1.1 403 Forbidden"), "{out}");
+        assert!(out.contains(r#""code":"use_not_allowed""#), "{out}");
+        // Screen shares, with or without `use`, are not affected.
+        assert!(
+            request(&off, &create(&p, 25))
+                .await
+                .starts_with("HTTP/1.1 201")
+        );
+
+        let relay = relay_with("[limits]\nmax_broadcasts = 1\nmax_camera_broadcasts = 2");
+        for _ in 0..2 {
+            let out = request(&relay, &camera(&p)).await;
+            assert!(out.starts_with("HTTP/1.1 201"), "{out}");
+        }
+        let out = request(&relay, &camera(&p)).await;
+        assert!(out.starts_with("HTTP/1.1 503"), "{out}");
+        assert!(out.contains(r#""code":"relay_full""#), "{out}");
+        // The screen-share cap is counted separately.
+        assert!(
+            request(&relay, &create(&p, 25))
+                .await
+                .starts_with("HTTP/1.1 201")
+        );
+
+        // A camera is not a pair use.
+        let b = "b".repeat(40);
+        let out = request(
+            &relay,
+            &authed(
+                "POST",
+                "/v1/pairs",
+                &format!(r#"{{"a":"{p}","b":"{b}","use":"camera"}}"#),
+            ),
+        )
+        .await;
+        assert!(out.starts_with("HTTP/1.1 400"), "{out}");
     }
 
     #[tokio::test]
@@ -586,7 +666,10 @@ mod tests {
 
         let off = relay_with("");
         let status = json_body(&request(&off, &authed("GET", "/v1/status", "")).await);
-        assert_eq!(status["uses"], json!(["images", "files", "screen_share"]));
+        assert_eq!(
+            status["uses"],
+            json!(["images", "files", "screen_share", "camera"])
+        );
         assert!(status.get("plugin_data").is_none());
         for req in [&pair, &create_pd] {
             let out = request(&off, req).await;
@@ -598,7 +681,7 @@ mod tests {
         let status = json_body(&request(&on, &authed("GET", "/v1/status", "")).await);
         assert_eq!(
             status["uses"],
-            json!(["images", "files", "screen_share", "plugin_data"])
+            json!(["images", "files", "screen_share", "camera", "plugin_data"])
         );
         assert_eq!(status["plugin_data"], json!({ "max_kbps_per_sender": 256 }));
         for req in [&pair, &create_pd] {
@@ -723,7 +806,7 @@ mod tests {
         let out = request(&relay, &authed("GET", "/v1/status", "")).await;
         let body: serde_json::Value =
             serde_json::from_str(out.split("\r\n\r\n").nth(1).unwrap()).unwrap();
-        assert_eq!(body["uses"], json!(["images", "screen_share"]));
+        assert_eq!(body["uses"], json!(["images", "screen_share", "camera"]));
 
         for (extra, status) in [
             (r#","use":"images""#, "201"),
