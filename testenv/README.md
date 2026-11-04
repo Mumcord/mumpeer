@@ -32,11 +32,12 @@ the generated relay config on every `up.sh`, so switch by running `up.sh` again.
 
 | Profile | Relay config | Used for |
 |---|---|---|
-| `all` | defaults: all uses allowed, broadcasts on (`max_broadcasts = 4`) | normal runs, broadcasts |
+| `all` | defaults: all uses allowed, broadcasts on (`max_broadcasts = 4`, `max_camera_broadcasts = 18`) | normal runs, broadcasts |
 | `no-files` | `[uses] files = false` | files disabled on the relay |
 | `no-screen` | `[uses] screen_share = false` | screen sharing disabled; no `broadcast` in `/v1/status` |
 | `no-images` | `[uses] images = false` | full-size images disabled |
-| `no-broadcast` | `[limits] max_broadcasts = 0` | pairs work, no broadcasts |
+| `no-camera` | `[uses] camera = false` | camera sharing disabled; `broadcast.max_camera` is 0 in `/v1/status` |
+| `no-broadcast` | `[limits] max_broadcasts = 0`, `max_camera_broadcasts = 0` | pairs work, no broadcasts |
 | `old` | no `[uses]` or broadcast limits | a previous release (AC-7.5); set `MUMPEER_IMAGE` too |
 
     MUMPEER_PROFILE=no-files testenv/up.sh
