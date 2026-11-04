@@ -160,10 +160,26 @@ Each session has a token bucket per direction (`session_mbit`) and all sessions 
 notices the loss and slows down by itself. Bursts of 100 ms worth of traffic (at least 64 KiB)
 pass, so a single video key frame is not cut.
 
-## Screen-share broadcasts
+Plugin data (a pair with `use = plugin_data`, or a plugin-data broadcast) has the lowest
+priority and its own limits from `[plugin_data]`:
+
+- **Per sender:** each side of a plugin-data pair and each publisher of a plugin-data broadcast
+  is capped at `max_kbps_per_sender` (default 512 kbit/s, bursts of at least 64 KiB) instead of
+  `session_mbit` or `broadcast_in_mbit`.
+- **Share:** all plugin data together uses at most `max_share_percent` (default 25 %) of
+  `total_mbit`.
+- **Lowest priority:** plugin data only gets total bandwidth that leaves half of the total
+  burst for everything else, so voice, screen sharing, images and files are never held up by
+  it. While the relay is busy with them, plugin data is dropped (from senders) or waits (copies
+  to viewers).
+
+## Screen-share and plugin-data broadcasts
 
 A broadcast (Mumcord spec 07, FR-7.41 … FR-7.50) lets one sharer upload a screen share once;
-the relay copies it to every admitted viewer. The bot creates the broadcast and admits viewers
+the relay copies it to every admitted viewer. A plugin-data broadcast (Mumcord spec 09,
+FR-9.59, `use = plugin_data` in [the API](api.md#broadcasts), `k = plg` between client and bot)
+works the same way for one participant sending plugin data to the others in a channel; it
+carries `data` units instead of media. The bot creates the broadcast and admits viewers
 through the [API](api.md#broadcasts); each side then opens its own outer link (QUIC or TCP, as
 above, same mutual TLS) and binds with its token and a role. The publisher's link and every
 subscriber's link are independent: there is no pairing and no `waiting` state.
@@ -187,7 +203,7 @@ Besides the pair codes (`unknown_token`, `expired`, `not_allowed`, `bot_gone`, `
 
 | Code | Meaning | Counts as a failed handshake? |
 | --- | --- | --- |
-| `use_not_allowed` | The relay does not allow screen sharing (`[uses] screen_share = false`) | no |
+| `use_not_allowed` | The relay does not allow the broadcast's use (`[uses] screen_share` or `[uses] plugin_data` is off) | no |
 | `broadcast_full` | The broadcast has all the subscribers it may have | no |
 | `not_allowed` | The certificate is not the one the token was issued for, or the token is already bound | yes |
 
@@ -200,17 +216,24 @@ by its payload. The layout, the size limits and the test vectors are defined in 
 ```text
 offset 0  version (1)          offset 5   key id (0 for control)
 offset 1  kind: 1 video,       offset 6   sequence, u32 BE (0 for control)
-          2 audio, 3 control   offset 10  payload size, u32 BE
+          2 audio, 3 control,  offset 10  payload size, u32 BE
+          4 data
 offset 2  flags: bit 0 keyframe (video only)
 offset 3  temporal layer 0–3 (video only)
-offset 4  video: codec 1 VP9, 2 AV1 · audio: 3 Opus ·
+offset 4  video: codec 1 VP9, 2 AV1 · audio: 3 Opus · data: 0 ·
           control: 1 keyreq, 2 key, 3 kf, 4 layers, 5 gone
 ```
 
-Media payloads are end-to-end encrypted by the sharer and forwarded unchanged; the relay reads
-only the header. A unit with an invalid header (unknown version, kind, codec or control type,
-flags or layer out of range, a control unit with a key id or sequence, a size out of range)
-closes the link.
+A `data` unit (test vector `010400000003000000070000015e`: key id 3, sequence 7, 350 bytes)
+carries one encrypted plugin message; the relay never sees the plugin or the payload. Its
+payload may be at most `max_unit_bytes` plus 64 bytes of encryption overhead (65 600 bytes by
+default).
+
+Media and plugin payloads are end-to-end encrypted by the sender and forwarded unchanged; the
+relay reads only the header. A unit with an invalid header (unknown version, kind, codec or
+control type, flags or layer out of range, a control unit with a key id or sequence, a size out
+of range) closes the link, as does a publisher sending media in a plugin-data broadcast or
+`data` in a screen share.
 
 How units travel:
 
@@ -235,7 +258,7 @@ How units travel:
 | `gone` | relay → pub | `slot` of a subscriber that left or was removed, so the publisher can rekey |
 
 A slot is unique within its broadcast while its subscriber is bound. A subscriber sending
-media closes its link; control types that are not its to send are ignored, as is a publisher
+media or `data` closes its link; control types that are not its to send are ignored, as is a publisher
 sending `keyreq`, `kf`, `layers` or `gone`.
 
 ### Pacing
@@ -243,7 +266,8 @@ sending `keyreq`, `kf`, `layers` or `gone`.
 Every subscriber has its own small queue, so a slow one never holds up the others (the same
 policy as Mumcord's direct fan-out):
 
-- Control units go first, then audio (at most 25 waiting, oldest dropped), then video.
+- Control units go first, then audio (at most 25 waiting, oldest dropped), then video, then
+  plugin data (at most 32 waiting, oldest dropped).
 - A video backlog of 3 frames costs the subscriber the highest temporal layer (at most one
   layer per 500 ms); after 3 s of keeping up it gets one layer back.
 - At 8 waiting frames the queue is cleared, the subscriber drops to layer 0, gets nothing until
@@ -253,6 +277,9 @@ policy as Mumcord's direct fan-out):
 - Copies to subscribers are paced by `broadcast_out_mbit` (all copies of one broadcast) and
   `total_mbit`: a subscriber waits for its share, its queue grows, and it loses layers.
   A unit larger than the burst (a big keyframe) is never cut.
+- In a plugin-data broadcast, units the publisher sends above `max_kbps_per_sender`, above the
+  plugin-data share or while the relay is busy (see [Bandwidth](#bandwidth)) are dropped; no
+  keyframe is involved. Copies to subscribers wait for spare bandwidth within the share.
 
 ### End
 
@@ -267,7 +294,8 @@ as close reason). When the publisher's link ends, the whole broadcast ends.
 | `revoked` | The bot dropped the certificate hash (`DELETE /v1/peers/{hash}`), or admitted the viewer again with a new token |
 
 A subscriber that leaves frees its seat; the publisher gets `gone`. The relay logs only the
-broadcast id, the viewer count, bytes and the end reason, never payloads.
+broadcast id, whether it carried plugin data, the viewer count, bytes, dropped units and the end
+reason, never payloads or plugin ids.
 
 ## Allowlist API
 

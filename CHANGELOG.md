@@ -11,6 +11,9 @@ All notable changes to mumpeer are listed here. The format follows
 - New allowed use `plugin_data` for Mumcord plugin data, off by default (`[uses] plugin_data`), with
   `[plugin_data]` limits. The API accepts `use = plugin_data` for pairs and broadcasts, and
   `GET /v1/status` reports `plugin_data.max_kbps_per_sender`.
+- Plugin data plane: plugin-data broadcasts carry the new `data` unit kind, and plugin data has
+  the lowest priority behind every other use. The `[plugin_data]` limits are enforced: per-sender
+  rate, share of the total bandwidth, unit size and a separate broadcast cap.
 - Relay for Mumcord peer-to-peer features: QUIC over UDP and TLS over TCP (for networks that
   block UDP), mutual TLS with the Mumble client certificate, pair-bound tokens, and unchanged
   forwarding of the end-to-end encrypted inner packets between the two sides of a pair only.
