@@ -6,6 +6,8 @@ All notable changes to mumpeer are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-06
+
 ### Added
 
 - New allowed use `camera` for Mumcord camera sharing, on by default (`[uses] camera`). The API
@@ -26,17 +28,6 @@ All notable changes to mumpeer are listed here. The format follows
 - Test environment profiles `plugin-data` and `no-plugin-data`; the `all` profile now turns plugin
   data on.
 - README: plugin data (`[uses] plugin_data`, the `[plugin_data]` limits and the lowest priority).
-- Relay for Mumcord peer-to-peer features: QUIC over UDP and TLS over TCP (for networks that
-  block UDP), mutual TLS with the Mumble client certificate, pair-bound tokens, and unchanged
-  forwarding of the end-to-end encrypted inner packets between the two sides of a pair only.
-- Allowlist API for the relay bot (`/v1/status`, `/v1/pairs`, `/v1/peers/{hash}`), authenticated
-  with a secret from the environment or a file.
-- Self-signed relay identity generated on first start; its SHA-256 fingerprint is printed and
-  announced.
-- Limits: bandwidth per session and in total, maximum sessions (overall and per certificate),
-  new connections and failed handshakes per source address, pairs per minute.
-- Release workflow: a `v*` tag builds static Linux binaries (x86_64, aarch64) and the multi-arch
-  Docker image `ghcr.io/mumcord/mumpeer`, and creates a draft GitHub release with `SHA256SUMS`.
 - `[uses]` config section to allow or disallow images, files and screen sharing on the relay.
   `GET /v1/status` lists the allowed `uses`, and `POST /v1/pairs` takes an optional `use` and
   answers `403 use_not_allowed` for a disabled one.
@@ -50,7 +41,23 @@ All notable changes to mumpeer are listed here. The format follows
   announces `broadcast.max_viewers` when broadcasts are available.
 - Test environment profiles (`MUMPEER_PROFILE`: `all`, `no-files`, `no-screen`, `no-images`,
   `no-broadcast`, `old`) and `MUMPEER_IMAGE` to run a previous mumpeer release.
-- Minimal logging: no full IP addresses, certificate hashes, tokens or secrets.
-- Docker image and a local test environment (`testenv/`) with network namespace profiles.
 - Logo, README and documentation: operator guide, configuration reference, bot API reference,
   wire and handshake overview, troubleshooting, FAQ, and the pages of the GitHub wiki.
+
+## [0.1.0] - 2026-10-31
+
+### Added
+
+- Relay for Mumcord peer-to-peer features: QUIC over UDP and TLS over TCP (for networks that
+  block UDP), mutual TLS with the Mumble client certificate, pair-bound tokens, and unchanged
+  forwarding of the end-to-end encrypted inner packets between the two sides of a pair only.
+- Allowlist API for the relay bot (`/v1/status`, `/v1/pairs`, `/v1/peers/{hash}`), authenticated
+  with a secret from the environment or a file.
+- Self-signed relay identity generated on first start; its SHA-256 fingerprint is printed and
+  announced.
+- Limits: bandwidth per session and in total, maximum sessions (overall and per certificate),
+  new connections and failed handshakes per source address, pairs per minute.
+- Release workflow: a `v*` tag builds static Linux binaries (x86_64, aarch64) and the multi-arch
+  Docker image `ghcr.io/mumcord/mumpeer`, and creates a draft GitHub release with `SHA256SUMS`.
+- Minimal logging: no full IP addresses, certificate hashes, tokens or secrets.
+- Docker image and a local test environment (`testenv/`) with network namespace profiles.
