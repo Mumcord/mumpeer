@@ -40,7 +40,7 @@ the generated relay config on every `up.sh`, so switch by running `up.sh` again.
 | `plugin-data` | `[uses] plugin_data = true` | plugin data on, default limits (`plugin_data.max_kbps_per_sender = 512` in `/v1/status`) |
 | `no-plugin-data` | `[uses] plugin_data = false` | plugin data off (the relay default); `plugin_data` is missing from `uses` in `/v1/status` |
 | `no-broadcast` | `[limits] max_broadcasts = 0`, `max_camera_broadcasts = 0` | pairs work, no broadcasts |
-| `old` | no `[uses]` or broadcast limits (plugin data off) | a previous release (AC-7.5); set `MUMPEER_IMAGE` too |
+| `old` | only `plugin_data = false`, no broadcast limits | a previous release (AC-7.5); set `MUMPEER_IMAGE` too |
 
     MUMPEER_PROFILE=no-files testenv/up.sh
     MUMPEER_PROFILE=old MUMPEER_IMAGE=ghcr.io/mumcord/mumpeer:<previous> MUMBOT_IMAGE=<previous mumbot> testenv/up.sh

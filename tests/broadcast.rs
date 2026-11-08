@@ -664,7 +664,7 @@ async fn camera_broadcasts_need_the_camera_use() {
     let status: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(
         status["uses"],
-        serde_json::json!(["images", "files", "screen_share"])
+        serde_json::json!(["images", "files", "screen_share", "plugin_data"])
     );
     assert_eq!(status["broadcast"]["max_camera"], 0);
     // Screen shares keep working.
@@ -673,7 +673,7 @@ async fn camera_broadcasts_need_the_camera_use() {
 
 #[tokio::test]
 async fn broadcast_binds_need_screen_sharing_allowed() {
-    let relay = relay("", "[uses]\nscreen_share = false").await;
+    let relay = relay("", "[uses]\nscreen_share = false\nplugin_data = false").await;
     let (a, b) = (identity(), identity());
     let body = format!(r#"{{"a":"{}","b":"{}","use":"files"}}"#, a.hash, b.hash);
     let (status, body) = api(&relay, "POST", "/v1/pairs", &body, SECRET).await;

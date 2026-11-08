@@ -93,12 +93,12 @@ one sharer and several viewers instead of a pair; see the
   allowed, up to `max_camera_broadcasts` cameras, each capped at `camera_max_kbps`). See the
   [wiki](https://github.com/Mumcord/mumpeer/wiki/Configuration#broadcasts).
 - **Plugin data:** Mumcord plugins can exchange data through the relay (pairs and broadcasts
-  with `use = plugin_data`). It is **off by default**: set `[uses] plugin_data = true` to allow it.
+  with `use = plugin_data`). It is **on by default**: set `[uses] plugin_data = false` to turn it off.
   `[plugin_data]` limits it: `max_kbps_per_sender` (512, announced to clients), `max_broadcasts`
   (16), `max_share_percent` (25 % of `total_mbit`) and `max_unit_bytes` (65536). Plugin data has
   the lowest priority and only uses bandwidth the other uses leave free. See the
   [wiki](https://github.com/Mumcord/mumpeer/wiki/Configuration#allowed-uses).
-- **Allowed uses:** the `[uses]` switches (`images`, `files`, `screen_share`, `camera`, and `plugin_data` for plugin data, which is off by default) let the operator
+- **Allowed uses:** the `[uses]` switches (`images`, `files`, `screen_share`, `camera`, and `plugin_data` for plugin data, which is on by default like the others) let the operator
   decide which kinds of traffic the relay carries; Mumcord shows disabled uses with a reason.
 - **Strong identity checks:** TLS 1.3 only, a client certificate is mandatory, and clients pin
   the relay's certificate by its SHA-256 fingerprint.

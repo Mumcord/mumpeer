@@ -18,14 +18,14 @@ api_secret_file = "/run/secrets/mumpeer_api_secret"
 # cert_file = "/etc/mumpeer/cert.pem"
 # key_file = "/etc/mumpeer/key.pem"
 
-# Which Mumcord features may use this relay (all default to true, except plugin_data).
+# Which Mumcord features may use this relay (all default to true).
 [uses]
 images = true
 files = true
 screen_share = true
 camera = true
-# Data of Mumcord plugins. Off by default: turn it on only if you want to relay it.
-plugin_data = false
+# Data of Mumcord plugins. On by default: set to false if you do not want to relay it.
+plugin_data = true
 
 # Limits for plugin data; only used when plugin_data = true above.
 [plugin_data]

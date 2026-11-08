@@ -92,7 +92,7 @@ curl -fsS -H "Authorization: Bearer $SECRET" http://127.0.0.1:7480/v1/status
 | `fp` | SHA-256 of the relay certificate (DER), 64 lowercase hex characters: what clients pin |
 | `sessions` | Pairs with at least one connected side |
 | `max_sessions` | The configured limit |
-| `uses` | The features allowed to use this relay (`[uses]` in the config), any of `images`, `files`, `screen_share`, `camera`, `plugin_data` (the last one only when the operator turned it on). The bot announces them to clients. |
+| `uses` | The features allowed to use this relay (`[uses]` in the config), any of `images`, `files`, `screen_share`, `camera`, `plugin_data` (the last one unless the operator turned it off). The bot announces them to clients. |
 | `plugin_data` | Present only when `plugin_data` is in `uses`. `max_kbps_per_sender` is the per-sender limit (`[plugin_data]` in the config); the bot announces it to clients. |
 | `broadcast` | Present only when screen-share broadcasts (`screen_share` allowed and `max_broadcasts` above 0) or camera broadcasts (`camera` allowed and `max_camera_broadcasts` above 0) are available. `max_viewers` is `max_viewers_per_broadcast`; the bot announces it to clients as `bc`. `max_camera` is `max_camera_broadcasts`, or 0 when `camera` is not allowed. |
 

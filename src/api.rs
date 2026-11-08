@@ -468,7 +468,7 @@ mod tests {
         assert_eq!(body["max_sessions"], 50);
         assert_eq!(
             body["uses"],
-            json!(["images", "files", "screen_share", "camera"])
+            json!(["images", "files", "screen_share", "camera", "plugin_data"])
         );
         assert_eq!(
             body["broadcast"],
@@ -552,7 +552,10 @@ mod tests {
 
         let off = relay_with("[uses]\ncamera = false");
         let body = json_body(&request(&off, &authed("GET", "/v1/status", "")).await);
-        assert_eq!(body["uses"], json!(["images", "files", "screen_share"]));
+        assert_eq!(
+            body["uses"],
+            json!(["images", "files", "screen_share", "plugin_data"])
+        );
         let out = request(&off, &camera(&p)).await;
         assert!(out.starts_with("HTTP/1.1 403 Forbidden"), "{out}");
         assert!(out.contains(r#""code":"use_not_allowed""#), "{out}");
@@ -650,7 +653,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn plugin_data_is_off_by_default_and_opt_in() {
+    async fn plugin_data_is_on_by_default_and_can_be_disabled() {
         let a = "a".repeat(40);
         let b = "b".repeat(40);
         let pair = authed(
@@ -664,7 +667,7 @@ mod tests {
             &format!(r#"{{"publisher":"{a}","max_viewers":5,"use":"plugin_data"}}"#),
         );
 
-        let off = relay_with("");
+        let off = relay_with("[uses]\nplugin_data = false");
         let status = json_body(&request(&off, &authed("GET", "/v1/status", "")).await);
         assert_eq!(
             status["uses"],
@@ -677,7 +680,7 @@ mod tests {
             assert!(out.contains(r#""code":"use_not_allowed""#), "{out}");
         }
 
-        let on = relay_with("[uses]\nplugin_data = true\n[plugin_data]\nmax_kbps_per_sender = 256");
+        let on = relay_with("[plugin_data]\nmax_kbps_per_sender = 256");
         let status = json_body(&request(&on, &authed("GET", "/v1/status", "")).await);
         assert_eq!(
             status["uses"],
@@ -806,7 +809,10 @@ mod tests {
         let out = request(&relay, &authed("GET", "/v1/status", "")).await;
         let body: serde_json::Value =
             serde_json::from_str(out.split("\r\n\r\n").nth(1).unwrap()).unwrap();
-        assert_eq!(body["uses"], json!(["images", "screen_share", "camera"]));
+        assert_eq!(
+            body["uses"],
+            json!(["images", "screen_share", "camera", "plugin_data"])
+        );
 
         for (extra, status) in [
             (r#","use":"images""#, "201"),
