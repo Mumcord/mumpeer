@@ -6,6 +6,11 @@ All notable changes to mumpeer are listed here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** `[uses] plugin_data` now defaults to `true`, like every other use. Relays allow plugin
+  data unless the config sets `plugin_data = false`.
+
 ## [0.2.0] - 2026-11-06
 
 ### Added

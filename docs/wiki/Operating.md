@@ -47,7 +47,7 @@ IP addresses, full certificate hashes, tokens, the secret, packet contents.
   The response includes `uses`, the enabled features from `[uses]`, and `broadcast` with
   `max_viewers` and `max_camera`. `broadcast` is absent when neither screen-share nor camera
   broadcasts are possible (each off in `[uses]` or with a limit of 0).
-  `plugin_data` (with `max_kbps_per_sender`) is present only when `[uses] plugin_data = true`.
+  `plugin_data` (with `max_kbps_per_sender`) is present unless `[uses] plugin_data = false`.
 - Load: `totals` and `dropped` in the log.
 
 ## Broadcasts

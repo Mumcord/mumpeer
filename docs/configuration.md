@@ -73,7 +73,7 @@ The bot needs the same value (`MUMBOT_PEER_API_SECRET` or its own `api_secret_fi
 ## `[uses]`
 
 Choose which Mumcord features may use the relay. All keys are optional booleans and default to
-`true`, so a config without this section relays everything, except `plugin_data`, which stays off until you turn it on. The enabled uses are announced to
+`true`, so a config without this section relays everything. The enabled uses are announced to
 clients, and the API refuses pairs for a disabled use with `403 use_not_allowed`.
 
 | Key | Default | Meaning |
@@ -82,11 +82,11 @@ clients, and the API refuses pairs for a disabled use with `403 use_not_allowed`
 | `files` | `true` | File transfers |
 | `screen_share` | `true` | Screen sharing |
 | `camera` | `true` | Camera sharing (camera broadcasts only; not a pair use). Off: `POST /v1/broadcasts` with `use = camera` answers `403 use_not_allowed`. |
-| `plugin_data` | `false` | Data of Mumcord plugins. **Off by default**; a missing key means off. |
+| `plugin_data` | `true` | Data of Mumcord plugins. On by default; set `plugin_data = false` to turn it off. |
 
 ## `[plugin_data]`
 
-Limits for plugin data. Only used when `[uses] plugin_data = true`. Every value must be greater
+Limits for plugin data. Only used while `[uses] plugin_data` is on (the default). Every value must be greater
 than 0.
 
 | Key | Default | Meaning |

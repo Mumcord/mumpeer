@@ -12,6 +12,6 @@ case "${1:-}" in
   plugin-data) printf '[uses]\nplugin_data = true\n' ;;
   no-plugin-data) printf '[uses]\nplugin_data = false\n' ;;
   no-broadcast) printf '[limits]\nmax_broadcasts = 0\nmax_camera_broadcasts = 0\n' ;;
-  old) ;; # a previous release may not know [uses] or the broadcast limits
+  old) printf '[uses]\nplugin_data = false\n' ;; # a previous release has no plugin data (a missing key now means on)
   *) echo "unknown MUMPEER_PROFILE '${1:-}' (all, no-files, no-screen, no-images, no-camera, plugin-data, no-plugin-data, no-broadcast, old)" >&2; exit 1 ;;
 esac

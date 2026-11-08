@@ -421,8 +421,8 @@ async fn data_units_reach_viewers_over_quic_and_tcp_unchanged() {
 }
 
 #[tokio::test]
-async fn plugin_data_is_off_unless_switched_on() {
-    let relay = relay("", "").await;
+async fn plugin_data_is_refused_when_switched_off() {
+    let relay = relay("", "[uses]\nplugin_data = false").await;
     let (a, b) = (identity(), identity());
     assert_eq!(try_create(&relay, &a, "plugin_data").await.0, 403);
     let body = format!(

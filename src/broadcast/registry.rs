@@ -693,7 +693,7 @@ mod tests {
     fn a_link_binds_only_while_its_use_is_on() {
         // Broadcasts that exist when the use is off can only come from an older config; the
         // check keeps a bind from carrying a use the operator did not allow.
-        let registry = registry("[uses]\nscreen_share = false");
+        let registry = registry("[uses]\nscreen_share = false\nplugin_data = false");
         let (id, token) = registry.create(P.into(), 25, SCREEN).unwrap();
         let viewer = registry.admit(id, V.into()).unwrap();
         assert_eq!(

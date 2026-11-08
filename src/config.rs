@@ -44,8 +44,8 @@ pub struct Config {
 }
 
 /// Which Mumcord features may use this relay. A missing key means allowed, so existing configs
-/// keep relaying everything. The exception is `plugin_data`: it is off until the operator turns
-/// it on, because plugin traffic is arbitrary data the operator did not allow before.
+/// keep relaying everything, including `plugin_data`; an operator turns it off with
+/// `plugin_data = false`.
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Uses {
@@ -64,7 +64,7 @@ impl Default for Uses {
             files: true,
             screen_share: true,
             camera: true,
-            plugin_data: false,
+            plugin_data: true,
         }
     }
 }
@@ -406,25 +406,35 @@ mod tests {
         let config = Config::parse(MINIMAL).unwrap();
         assert_eq!(
             config.uses.enabled(),
-            ["images", "files", "screen_share", "camera"]
+            ["images", "files", "screen_share", "camera", "plugin_data"]
         );
         let config = Config::parse("public_host = \"a.example\"\n[uses]\nfiles = false").unwrap();
-        assert_eq!(config.uses.enabled(), ["images", "screen_share", "camera"]);
+        assert_eq!(
+            config.uses.enabled(),
+            ["images", "screen_share", "camera", "plugin_data"]
+        );
         assert!(!config.uses.all());
         // Cameras are not part of what a pair without `use` needs.
         let config = Config::parse("public_host = \"a.example\"\n[uses]\ncamera = false").unwrap();
-        assert_eq!(config.uses.enabled(), ["images", "files", "screen_share"]);
+        assert_eq!(
+            config.uses.enabled(),
+            ["images", "files", "screen_share", "plugin_data"]
+        );
         assert!(config.uses.all());
         assert!(Config::parse("public_host = \"a.example\"\n[uses]\nvideo = true").is_err());
         assert!(Config::parse("public_host = \"a.example\"\n[uses]\nfiles = 1").is_err());
     }
 
     #[test]
-    fn plugin_data_is_off_by_default_and_opt_in() {
+    fn plugin_data_is_on_by_default_and_can_be_disabled() {
         let config = Config::parse("public_host = \"a.example\"").unwrap();
-        assert!(!config.uses.allows("plugin_data"));
+        assert!(config.uses.allows("plugin_data"));
         assert!(config.uses.all());
-        let on = Config::parse("public_host = \"a.example\"\n[uses]\nplugin_data = true").unwrap();
+        let off =
+            Config::parse("public_host = \"a.example\"\n[uses]\nplugin_data = false").unwrap();
+        assert!(!off.uses.allows("plugin_data"));
+        assert!(off.uses.all());
+        let on = Config::parse("public_host = \"a.example\"").unwrap();
         assert_eq!(
             on.uses.enabled(),
             ["images", "files", "screen_share", "camera", "plugin_data"]

@@ -33,7 +33,7 @@ fn every_profile_parses_with_its_uses_and_limits() {
     let no_camera = profile("no-camera").unwrap();
     assert_eq!(
         no_camera.uses.enabled(),
-        ["images", "files", "screen_share"]
+        ["images", "files", "screen_share", "plugin_data"]
     );
     assert!(no_camera.uses.all(), "pairs without `use` keep working");
 
