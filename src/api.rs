@@ -241,6 +241,9 @@ struct BroadcastRequest {
     /// `screen_share` (default), `camera` or `plugin_data`.
     #[serde(default)]
     r#use: Option<String>,
+    /// The publisher will use the Bovnar media profile (FR-7.96).
+    #[serde(default)]
+    media: bool,
 }
 
 #[derive(Deserialize)]
@@ -275,6 +278,8 @@ fn route(head: &Head, body: &[u8], relay: &Relay) -> Response {
                     "max_viewers": max_viewers,
                     "max_camera": relay.broadcasts.max_camera(),
                 });
+                // The relay speaks the Bovnar media profile (FR-7.96).
+                status["media"] = json!(crate::broadcast::media::MEDIA_VERSION);
             }
             if relay.uses.plugin_data {
                 status["plugin_data"] =
@@ -355,7 +360,7 @@ fn create_broadcast(body: &[u8], relay: &Relay) -> Response {
     }
     match relay
         .broadcasts
-        .create(publisher, request.max_viewers, use_)
+        .create(publisher, request.max_viewers, use_, request.media)
     {
         Ok((id, token)) => Response::json(
             201,

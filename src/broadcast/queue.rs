@@ -147,6 +147,10 @@ impl Policy {
         self.wanted_layer = layer.min(MAX_TEMPORAL_LAYER);
     }
 
+    pub fn wanted_layer(&self) -> u8 {
+        self.wanted_layer
+    }
+
     pub fn pop(&mut self) -> Option<Unit> {
         self.control
             .pop_front()
