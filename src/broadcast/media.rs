@@ -107,6 +107,45 @@ impl Meta {
     }
 }
 
+/// Largest description document the profile allows, before encryption overhead.
+pub const MAX_DESCRIPTION: usize = 8 * 1024;
+/// Room for the SFrame header and tag around the encrypted description.
+pub const DESCRIPTION_OVERHEAD: usize = 64;
+/// Control kind of the stream description.
+pub const KIND_DESCRIPTION: u8 = 0;
+
+/// The latest description ciphertext on one broadcast link (FR-7.100).
+///
+/// The relay never parses it: it keeps the channel-0 `description` message so a late joiner can
+/// get it right after the key exchange. The size is capped before storing, and the cache is
+/// cleared when the broadcast ends.
+#[derive(Debug, Default)]
+pub struct DescriptionCache {
+    latest: Option<bytes::Bytes>,
+}
+
+impl DescriptionCache {
+    /// Stores `payload` when it is a channel-0 description message; returns whether it did.
+    pub fn store(&mut self, channel: u16, payload: &[u8]) -> bool {
+        if channel != CHANNEL_CONTROL || payload.first() != Some(&KIND_DESCRIPTION) {
+            return false;
+        }
+        if payload.len() > MAX_DESCRIPTION + DESCRIPTION_OVERHEAD {
+            return false;
+        }
+        self.latest = Some(bytes::Bytes::copy_from_slice(payload));
+        true
+    }
+
+    pub fn latest(&self) -> Option<bytes::Bytes> {
+        self.latest.clone()
+    }
+
+    pub fn clear(&mut self) {
+        self.latest = None;
+    }
+}
+
 /// Reads routing metadata from the chunks of one new-format link, without gathering payloads.
 pub struct MetaReader {
     mux: MuxReader,
@@ -271,6 +310,25 @@ mod tests {
         let big = vec![0u8; MAX_AUDIO_MESSAGE + 1];
         reader.push(&document(&[(5, &big)]));
         assert_eq!(reader.next_meta(), Err(MediaError::OutOfProfile));
+    }
+
+    #[test]
+    fn only_the_latest_description_is_kept_and_size_checked() {
+        let mut cache = DescriptionCache::default();
+        assert!(!cache.store(1, &[KIND_DESCRIPTION, 1]));
+        assert!(!cache.store(0, &[3, 1]));
+        assert!(cache.store(0, &[KIND_DESCRIPTION, 1, 2]));
+        assert_eq!(
+            cache.latest().as_deref(),
+            Some(&[KIND_DESCRIPTION, 1, 2][..])
+        );
+        assert!(cache.store(0, &[KIND_DESCRIPTION, 3]));
+        assert_eq!(cache.latest().as_deref(), Some(&[KIND_DESCRIPTION, 3][..]));
+        let too_big = vec![KIND_DESCRIPTION; MAX_DESCRIPTION + DESCRIPTION_OVERHEAD + 1];
+        assert!(!cache.store(0, &too_big));
+        assert_eq!(cache.latest().as_deref(), Some(&[KIND_DESCRIPTION, 3][..]));
+        cache.clear();
+        assert_eq!(cache.latest(), None);
     }
 
     #[test]
