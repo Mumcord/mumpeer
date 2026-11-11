@@ -146,6 +146,109 @@ impl DescriptionCache {
     }
 }
 
+/// The bytes that open a new-format link's document.
+pub const OPENING: &[u8] = b"#!bovnar 1.2\n.media=\0";
+
+/// One complete message: its channel and payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Message {
+    pub channel: u16,
+    pub payload: Vec<u8>,
+}
+
+/// Reassembles complete messages from chunks of a link (used for control routing).
+pub struct MessageReader {
+    mux: MuxReader,
+    buffer: Vec<u8>,
+    fatal: bool,
+}
+
+impl MessageReader {
+    pub fn new() -> Self {
+        Self {
+            mux: MuxReader::with_options(MAX_VIDEO_MESSAGE as u64, Some("media"))
+                .expect("the fixed media profile is valid"),
+            buffer: Vec::new(),
+            fatal: false,
+        }
+    }
+
+    pub fn push(&mut self, bytes: &[u8]) {
+        self.buffer.extend_from_slice(bytes);
+    }
+
+    pub fn next_message(&mut self) -> Result<Option<Message>, MediaError> {
+        if self.fatal {
+            return Err(MediaError::Malformed);
+        }
+        let (consumed, outcome) = {
+            let mut input = &self.buffer[..];
+            let result = self.mux.read(&mut input);
+            let consumed = self.buffer.len() - input.len();
+            let outcome = match result {
+                Ok(Some(message)) => {
+                    let channel =
+                        u16::try_from(message.channel).map_err(|_| MediaError::OutOfProfile)?;
+                    if channel > MAX_CHANNEL
+                        || matches!(channel_use(channel), Some(ChannelUse::Reserved))
+                        || message_limit(channel).is_some_and(|limit| message.payload.len() > limit)
+                    {
+                        Err(MediaError::OutOfProfile)
+                    } else {
+                        Ok(Some(Message {
+                            channel,
+                            payload: message.payload.to_vec(),
+                        }))
+                    }
+                }
+                Ok(None) => Ok(None),
+                Err(_) => Err(MediaError::Malformed),
+            };
+            (consumed, outcome)
+        };
+        if consumed > 0 {
+            self.buffer.drain(..consumed);
+        }
+        match outcome {
+            Ok(message) => Ok(message),
+            Err(error) => {
+                self.fatal = true;
+                Err(error)
+            }
+        }
+    }
+
+    pub fn finish(&mut self) -> Result<(), MediaError> {
+        match self.mux.finish() {
+            Ok(()) => Ok(()),
+            Err(_) => {
+                self.fatal = true;
+                Err(MediaError::Malformed)
+            }
+        }
+    }
+}
+
+impl Default for MessageReader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Encodes one message as mux chunks, without the document opening.
+pub fn encode_message(channel: u16, payload: &[u8]) -> Result<bytes::Bytes, MediaError> {
+    if channel > MAX_CHANNEL || matches!(channel_use(channel), Some(ChannelUse::Reserved)) {
+        return Err(MediaError::OutOfProfile);
+    }
+    if message_limit(channel).is_some_and(|limit| payload.len() > limit) {
+        return Err(MediaError::OutOfProfile);
+    }
+    let writer = bovnar::codec::MuxWriter::new("media").map_err(|_| MediaError::Malformed)?;
+    let mut out = Vec::new();
+    writer.write_message(&mut out, u64::from(channel), payload);
+    Ok(bytes::Bytes::from(out))
+}
+
 /// Reads routing metadata from the chunks of one new-format link, without gathering payloads.
 pub struct MetaReader {
     mux: MuxReader,
@@ -241,6 +344,58 @@ impl MetaReader {
 impl Default for MetaReader {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// A bounded queue of encoded media messages with a wake-up for the writer.
+pub struct MediaQueue {
+    items: std::sync::Mutex<std::collections::VecDeque<bytes::Bytes>>,
+    notify: tokio::sync::Notify,
+    capacity: usize,
+}
+
+impl MediaQueue {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            items: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            notify: tokio::sync::Notify::new(),
+            capacity,
+        }
+    }
+
+    /// Queues one encoded message; the oldest is dropped when the queue is full.
+    pub fn push(&self, bytes: bytes::Bytes) {
+        let mut items = self
+            .items
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if items.len() >= self.capacity {
+            items.pop_front();
+        }
+        items.push_back(bytes);
+        drop(items);
+        self.notify.notify_one();
+    }
+
+    pub async fn next(&self) -> bytes::Bytes {
+        loop {
+            if let Some(bytes) = self
+                .items
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pop_front()
+            {
+                return bytes;
+            }
+            self.notify.notified().await;
+        }
+    }
+
+    pub fn try_pop(&self) -> Option<bytes::Bytes> {
+        self.items
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop_front()
     }
 }
 
