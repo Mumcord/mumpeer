@@ -27,6 +27,9 @@ clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1.1"
+# The Bovnar media profile of Mumcord 0.9.0: the same document codec the client uses, so the
+# relay can route the new broadcast links without parsing their payload (FR-7.89).
+bovnar = "2.1.0"
 
 [dev-dependencies]
 tempfile = "3"
