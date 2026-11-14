@@ -2,7 +2,8 @@ name: Release
 
 # Pushing a tag `vX.Y.Z` on main checks that it matches the Cargo version, builds the static
 # Linux binaries and the multi-arch Docker image, and creates a DRAFT GitHub release with the
-# binaries and SHA256SUMS. The maintainer reviews and publishes the release by hand.
+# binaries, one SBOM per binary and image platform, and SHA256SUMS. The maintainer reviews and
+# publishes the release by hand.
 on:
   push:
     tags: ["v*"]
@@ -97,6 +98,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
     steps:
       - uses: actions/checkout@v7
 
@@ -119,7 +122,8 @@ jobs:
             type=raw,value=latest,enable=${{ !contains(needs.guard.outputs.version, '-') }}
 
       # The build stage cross-compiles on the runner's own platform, so arm64 needs no emulation.
-      - uses: docker/build-push-action@v7
+      - id: push
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -127,9 +131,47 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
+  # One CycloneDX SBOM per binary and per image platform (scripts/generate-sbom.sh), from the
+  # tagged commit and the image that was just pushed, addressed by its digest.
+  sbom:
+    name: Generate SBOMs
+    needs: [guard, docker]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-cyclonedx
+        run: |
+          source scripts/tools.env
+          cargo install cargo-cyclonedx --version "$CARGO_CYCLONEDX_VERSION" --locked
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Generate SBOMs
+        env:
+          VERSION: ${{ needs.guard.outputs.version }}
+          IMAGE: ghcr.io/mumcord/mumpeer@${{ needs.docker.outputs.digest }}
+        run: scripts/generate-sbom.sh "$VERSION" sbom "$IMAGE"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mumpeer-sbom
+          path: sbom/*
+          if-no-files-found: error
+
   release:
     name: Draft release
-    needs: [guard, binaries, docker]
+    needs: [guard, binaries, docker, sbom]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -150,8 +192,10 @@ jobs:
           VERSION: ${{ needs.guard.outputs.version }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          # Fails if any binary is missing.
-          files=(mumpeer-*-linux-x86_64.tar.gz mumpeer-*-linux-aarch64.tar.gz)
+          # Fails if any binary or SBOM is missing.
+          files=(mumpeer-*-linux-x86_64.tar.gz mumpeer-*-linux-aarch64.tar.gz
+            mumpeer-*-linux-x86_64.cdx.json mumpeer-*-linux-aarch64.cdx.json
+            mumpeer-*-docker-amd64.cdx.json mumpeer-*-docker-arm64.cdx.json)
           ls -l -- "${files[@]}"
           sha256sum -- "${files[@]}" > SHA256SUMS
           cat SHA256SUMS
@@ -162,6 +206,8 @@ jobs:
           - **Docker** (linux/amd64, linux/arm64): \`docker pull ghcr.io/mumcord/mumpeer:$VERSION\`
 
           Each archive holds the \`mumpeer\` binary at its top level. Check a download with \`sha256sum -c SHA256SUMS --ignore-missing\`. Start with the README and \`mumpeer.example.toml\` in the archive.
+
+          Each binary and each image platform has a software bill of materials (SBOM, CycloneDX JSON) that lists its Rust crates and the statically linked libraries, for the image also its Alpine packages: \`mumpeer-$VERSION-linux-<arch>.cdx.json\` and \`mumpeer-$VERSION-docker-<platform>.cdx.json\`.
 
           Built by [this workflow run]($RUN_URL). Licensed under the [GNU AGPL-3.0](https://github.com/Mumcord/mumpeer/blob/main/LICENSE) only.
 
