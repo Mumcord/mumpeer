@@ -1,7 +1,7 @@
 # Multi-arch image of the mumpeer relay. The build stage runs on the build machine's own platform
 # and cross-compiles a static musl binary with zig, so an arm64 image never needs a slow emulated
 # Rust build. The `:-` defaults keep a plain `docker build` (without buildx) working.
-FROM --platform=${BUILDPLATFORM:-linux/amd64} ghcr.io/rust-cross/cargo-zigbuild:0.24.0 AS build
+FROM --platform=${BUILDPLATFORM:-linux/amd64} ghcr.io/rust-cross/cargo-zigbuild:0.24.1 AS build
 ARG TARGETARCH
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
