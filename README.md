@@ -298,6 +298,24 @@ docker pull ghcr.io/mumcord/mumpeer:0.1.0
 `latest` follows the newest stable version; pre-releases (`-rc.N`) never move it. Pin a version
 in production.
 
+### SBOM
+
+Every release has a software bill of materials (SBOM) as CycloneDX 1.5 JSON for each file whose
+contents differ, attached to the release and listed in `SHA256SUMS`:
+
+- `mumpeer-<version>-linux-x86_64.cdx.json` and `…-linux-aarch64.cdx.json` for the binaries: the
+  Rust crates compiled for that target (without build and test dependencies) and what is linked
+  in statically: the Rust standard library, musl libc and the runtime of the Zig toolchain, with
+  the versions of the builder image. The C code of `ring` and `bovnar` is built from those crates
+  and is covered by their entries.
+- `mumpeer-<version>-docker-amd64.cdx.json` and `…-docker-arm64.cdx.json` for the Docker image:
+  the same as the binary of that platform, plus the Alpine packages of the image.
+
+To make them locally, install the cargo-cyclonedx version from `scripts/tools.env`
+(`cargo install cargo-cyclonedx --version <version> --locked`) and run
+`scripts/generate-sbom.sh 0.0.0 out` (needs Docker and jq). A third argument adds the image, for
+example `ARCHS=x86_64 scripts/generate-sbom.sh 0.0.0 out mumpeer:dev`.
+
 ## Development and contributing
 
 ```sh
@@ -328,8 +346,9 @@ Maintainers only. A release is built by pushing a version tag; publishing stays 
    on `main`, builds static Linux binaries (x86_64 and aarch64), and pushes the multi-arch image
    to `ghcr.io/mumcord/mumpeer` with the version tag. Plain versions also move `latest`;
    pre-release tags such as `v0.2.0-rc.1` do not.
-4. The workflow creates a **draft** GitHub release with the binaries and `SHA256SUMS`. Review it
-   and publish it by hand.
+4. The workflow writes the SBOMs (see [SBOM](#sbom)) from the tagged commit and the pushed image.
+5. The workflow creates a **draft** GitHub release with the binaries, the SBOMs and `SHA256SUMS`.
+   Review it and publish it by hand.
 
 ## Licence
 
