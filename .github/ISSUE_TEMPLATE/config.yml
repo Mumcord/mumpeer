@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://github.com/Mumcord/mumpeer#readme
+    about: Installation, configuration, ports and limits.
+  - name: Mumcord client
+    url: https://github.com/Mumcord/mumcord
+    about: Problems with the Mumcord desktop client belong in its own repository.
+  - name: Mumbot
+    url: https://github.com/Mumcord/mumbot
+    about: Problems with the relay bot (mumbot peer) belong in its own repository.
+  - name: Security vulnerability
+    url: https://github.com/Mumcord/mumpeer/security/advisories/new
+    about: Report security problems privately, never in a public issue. See SECURITY.md.

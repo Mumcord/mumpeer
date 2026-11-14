@@ -1,0 +1,31 @@
+# cargo-deny configuration: advisories, licences, banned and duplicate crates, and sources.
+# Run `cargo deny check`; CI does the same.
+
+[advisories]
+version = 2
+yanked = "deny"
+
+[licenses]
+version = 2
+# mumpeer itself is AGPL-3.0-only; everything else must be permissive. Keep this list to the
+# licences the dependency tree actually uses.
+allow = [
+    "AGPL-3.0-only",
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
