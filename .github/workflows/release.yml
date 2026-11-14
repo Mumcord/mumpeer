@@ -66,12 +66,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # Static musl binaries, cross-compiled with zig in the same builder image as the Dockerfile
-      # (keep the two tags in sync; Dependabot only updates the Dockerfile).
+      # Static musl binaries, cross-compiled with zig in the builder image of the Dockerfile. The
+      # image is read from there, so one Dependabot update moves the archives and the Docker
+      # images together.
       - name: Build
         run: |
-          docker run --rm -v "$PWD:/io" -w /io \
-            ghcr.io/rust-cross/cargo-zigbuild:0.24.0 \
+          builder="$(sed -n 's/^FROM .* \([^ ]*cargo-zigbuild:[^ ]*\) AS build$/\1/p' Dockerfile)"
+          [ -n "$builder" ] || { echo "::error::builder image not found in the Dockerfile"; exit 1; }
+          docker run --rm -v "$PWD:/io" -w /io "$builder" \
             cargo zigbuild --release --locked --target ${{ matrix.target }}
           mkdir -p out && cp target/${{ matrix.target }}/release/mumpeer out/
 
