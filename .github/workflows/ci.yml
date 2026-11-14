@@ -19,6 +19,7 @@ env:
   CARGO_TERM_COLOR: always
   # No debug info: CI only needs pass/fail, and it makes linking faster and the caches smaller.
   CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_DENY_VERSION: 0.20.2
 
 jobs:
   test:
@@ -90,3 +91,28 @@ jobs:
           scripts/generate-sbom.sh 0.0.0 sbom
           ARCHS=x86_64 scripts/generate-sbom.sh 0.0.0 sbom mumpeer:ci
           ls -l sbom
+
+  deny:
+    name: Dependency checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore cargo-deny
+        id: deny
+        uses: actions/cache@v6
+        with:
+          path: ~/.cargo/bin/cargo-deny
+          key: cargo-deny-${{ runner.os }}-${{ runner.arch }}-${{ env.CARGO_DENY_VERSION }}
+
+      - name: Install cargo-deny
+        if: steps.deny.outputs.cache-hit != 'true'
+        run: cargo install --locked cargo-deny --version "$CARGO_DENY_VERSION"
+
+      - name: Advisories, licences, bans and sources
+        run: cargo deny check
