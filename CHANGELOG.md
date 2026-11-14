@@ -6,6 +6,12 @@ All notable changes to mumpeer are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Releases include a software bill of materials (SBOM, CycloneDX JSON) for each binary and each
+  Docker image platform: `mumpeer-<version>-linux-<arch>.cdx.json` and
+  `mumpeer-<version>-docker-<platform>.cdx.json`, listed in `SHA256SUMS`.
+
 ## [0.2.1] - 2026-11-08
 
 ### Changed
