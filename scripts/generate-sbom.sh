@@ -54,11 +54,9 @@ cleanup() {
 trap cleanup EXIT
 
 # The binaries and the image are built in this image, so it is the source of the versions that
-# are linked in statically. The release workflow names it a second time.
+# are linked in statically. The release workflow reads it from the Dockerfile in the same way.
 builder="$(sed -n 's/^FROM .* \([^ ]*cargo-zigbuild:[^ ]*\) AS build$/\1/p' Dockerfile)"
 [ -n "$builder" ] || fail "builder image not found in the Dockerfile"
-grep -q -F " $builder " .github/workflows/release.yml \
-  || fail "release.yml does not build with $builder like the Dockerfile"
 
 # cargo-zigbuild drops Rust's own musl and start files and links the ones of Zig.
 # shellcheck disable=SC2016 # runs in the builder image
