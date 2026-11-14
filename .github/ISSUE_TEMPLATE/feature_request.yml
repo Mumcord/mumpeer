@@ -1,0 +1,37 @@
+name: Feature request
+description: Suggest an idea or improvement for mumpeer.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        mumpeer only forwards already encrypted packets between two Mumcord clients; it never dials out and never talks to the Mumble server.
+        Check the [README](https://github.com/Mumcord/mumpeer#readme) first – your idea may already exist or be planned.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Describe the situation, not only the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Your idea
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Transports (QUIC, TLS)
+        - Allowlist API
+        - Limits
+        - Config and setup
+        - Docker and releases
+        - Other
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives or workarounds you've considered
