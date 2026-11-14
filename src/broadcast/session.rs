@@ -22,6 +22,9 @@ use super::control::{
     Assembler, Content, ControlKind, ENCRYPTION_OVERHEAD, HEADER_LEN, Header, MAX_DATA_PAYLOAD,
     MAX_KEY_BODY, Unit, WANT_LEN,
 };
+use super::media::{
+    self, ChannelUse, DescriptionCache, MediaQueue, Message, channel_use, encode_message,
+};
 use super::queue::{ControlQueue, Queue};
 use super::registry::{BroadcastEnd, BroadcastId};
 use crate::config::PluginData;
@@ -44,6 +47,8 @@ const READY: &str = r#"{"v":1,"t":"ready"}"#;
 pub struct Subscriber {
     pub slot: u16,
     queue: Queue,
+    /// New-format messages waiting for this subscriber.
+    media: MediaQueue,
     last_keyframe_request: Mutex<Option<Instant>>,
     last_want: Mutex<Option<Instant>>,
 }
@@ -53,6 +58,7 @@ impl Subscriber {
         Self {
             slot,
             queue: Queue::default(),
+            media: MediaQueue::new(64),
             last_keyframe_request: Mutex::new(None),
             last_want: Mutex::new(None),
         }
@@ -65,8 +71,14 @@ pub struct Session {
     /// The largest `data` payload the publisher may send; `None` for a screen share, whose
     /// publisher sends media instead.
     max_data_payload: Option<u32>,
+    /// The broadcast uses the new media document instead of the legacy units.
+    media: bool,
     subscribers: Mutex<Vec<Arc<Subscriber>>>,
     to_publisher: ControlQueue,
+    /// New-format control messages for the publisher.
+    to_publisher_media: MediaQueue,
+    /// Latest description ciphertext for late joiners.
+    description: Mutex<DescriptionCache>,
     last_keyframe_request: Mutex<Option<Instant>>,
     inbound: Mutex<TokenBucket>,
     outbound: Mutex<TokenBucket>,
@@ -105,8 +117,11 @@ impl Session {
     fn with(max_data_payload: Option<u32>, in_bytes_per_s: f64, out_mbit: u32) -> Self {
         Self {
             max_data_payload,
+            media: false,
             subscribers: Mutex::new(Vec::new()),
             to_publisher: ControlQueue::new(PUBLISHER_CONTROL),
+            to_publisher_media: MediaQueue::new(PUBLISHER_CONTROL),
+            description: Mutex::new(DescriptionCache::default()),
             last_keyframe_request: Mutex::new(None),
             inbound: Mutex::new(TokenBucket::new(in_bytes_per_s)),
             outbound: Mutex::new(TokenBucket::new(mbit_to_bytes(out_mbit))),
@@ -126,6 +141,20 @@ impl Session {
             (Content::Data, Some(max)) => header.payload_len <= max,
             _ => false,
         }
+    }
+
+    /// Switches a broadcast to the new media document (set before it is shared).
+    pub fn set_media(&mut self) {
+        self.media = true;
+    }
+
+    pub fn media(&self) -> bool {
+        self.media
+    }
+
+    /// The latest description ciphertext, for a late joiner.
+    pub fn description(&self) -> Option<Bytes> {
+        lock(&self.description).latest()
     }
 
     pub fn viewers(&self) -> usize {
@@ -151,7 +180,15 @@ impl Session {
             subscribers.len() < before
         };
         if removed {
-            self.to_publisher.push(Unit::gone(slot));
+            if self.media {
+                let mut payload = vec![6];
+                payload.extend_from_slice(&slot.to_be_bytes());
+                if let Ok(bytes) = encode_message(media::CHANNEL_CONTROL, &payload) {
+                    self.to_publisher_media.push(bytes);
+                }
+            } else {
+                self.to_publisher.push(Unit::gone(slot));
+            }
         }
     }
 
@@ -178,6 +215,130 @@ impl Session {
             *own = Some(now);
         }
         self.to_publisher.push(Unit::keyframe_request());
+    }
+
+    /// A message from a new-format publisher.
+    pub fn publisher_media(&self, message: Message, bandwidth: &Bandwidth, now: Instant) -> bool {
+        match channel_use(message.channel) {
+            Some(ChannelUse::Control) => self.publisher_control(message),
+            Some(ChannelUse::VideoLayer(_) | ChannelUse::Audio | ChannelUse::PluginData) => {
+                let len = message.payload.len();
+                let over = lock(&self.inbound).spend(len, now).is_err()
+                    || lock(&bandwidth.total).spend(len, now).is_err();
+                if over {
+                    return true;
+                }
+                self.bytes_in.fetch_add(len as u64, Ordering::Relaxed);
+                let Ok(bytes) = encode_message(message.channel, &message.payload) else {
+                    return false;
+                };
+                let layer = match channel_use(message.channel) {
+                    Some(ChannelUse::VideoLayer(layer)) => Some(layer),
+                    _ => None,
+                };
+                for subscriber in lock(&self.subscribers).iter() {
+                    if layer.is_none_or(|layer| {
+                        subscriber
+                            .queue
+                            .with(|policy| layer <= policy.wanted_layer())
+                    }) {
+                        subscriber.media.push(bytes.clone());
+                    }
+                }
+                true
+            }
+            Some(ChannelUse::Reserved) | None => false,
+        }
+    }
+
+    fn publisher_control(&self, message: Message) -> bool {
+        let Some((&kind, body)) = message.payload.split_first() else {
+            return false;
+        };
+        match kind {
+            media::KIND_DESCRIPTION => {
+                lock(&self.description).store(media::CHANNEL_CONTROL, &message.payload);
+                if let Ok(bytes) = encode_message(media::CHANNEL_CONTROL, &message.payload) {
+                    for subscriber in lock(&self.subscribers).iter() {
+                        subscriber.media.push(bytes.clone());
+                    }
+                }
+                true
+            }
+            2 => {
+                // `key`: a slot then the viewer's chunk. The relay strips the slot.
+                let Some((slot, rest)) = body.split_first_chunk::<2>() else {
+                    return false;
+                };
+                let slot = u16::from_be_bytes(*slot);
+                let target = lock(&self.subscribers)
+                    .iter()
+                    .find(|s| s.slot == slot)
+                    .cloned();
+                if let Some(target) = target {
+                    let mut payload = Vec::with_capacity(1 + rest.len());
+                    payload.push(kind);
+                    payload.extend_from_slice(rest);
+                    if let Ok(bytes) = encode_message(media::CHANNEL_CONTROL, &payload) {
+                        target.media.push(bytes);
+                    }
+                }
+                true
+            }
+            // The publisher does not send the other control kinds.
+            _ => true,
+        }
+    }
+
+    /// A message from a new-format subscriber (control only).
+    pub fn subscriber_media(&self, from: &Subscriber, message: Message, now: Instant) -> bool {
+        if message.channel != media::CHANNEL_CONTROL {
+            return false;
+        }
+        let Some((&kind, body)) = message.payload.split_first() else {
+            return false;
+        };
+        let to_publisher = |payload: Vec<u8>| {
+            if let Ok(bytes) = encode_message(media::CHANNEL_CONTROL, &payload) {
+                self.to_publisher_media.push(bytes);
+            }
+        };
+        match kind {
+            1 => {
+                // `keyreq`: the relay prepends the subscriber's slot.
+                let mut payload = Vec::with_capacity(3 + body.len());
+                payload.push(kind);
+                payload.extend_from_slice(&from.slot.to_be_bytes());
+                payload.extend_from_slice(body);
+                to_publisher(payload);
+                true
+            }
+            3 => {
+                self.request_keyframe(Some(from), now);
+                to_publisher(vec![kind]);
+                true
+            }
+            4 => {
+                if let Some(&layer) = body.first() {
+                    from.queue.with(|policy| policy.set_wanted_layer(layer));
+                }
+                true
+            }
+            5 => {
+                let mut last = lock(&from.last_want);
+                if last.is_some_and(|at| now.duration_since(at) < WANT_PER_SUBSCRIBER) {
+                    return true;
+                }
+                *last = Some(now);
+                let mut payload = Vec::with_capacity(3 + body.len());
+                payload.push(kind);
+                payload.extend_from_slice(&from.slot.to_be_bytes());
+                payload.extend_from_slice(body);
+                to_publisher(payload);
+                true
+            }
+            _ => true,
+        }
     }
 
     /// A unit from the publisher, which passed [`Self::accepts_from_publisher`]. `false` means
@@ -465,6 +626,9 @@ pub async fn run_publisher(
     session: Arc<Session>,
     mut end: watch::Receiver<Option<BroadcastEnd>>,
 ) {
+    if session.media() {
+        return run_publisher_media(relay, link, id, session, end).await;
+    }
     let started = Instant::now();
     let (mut rx, mut tx) = split(link);
     let last_unit = AtomicU64::new(0);
@@ -518,6 +682,179 @@ pub async fn run_publisher(
     );
 }
 
+/// Runs a new-format publisher link: messages are routed by channel, layer filtering happens
+/// here, control messages are rewritten for the publisher.
+async fn run_publisher_media(
+    relay: &Relay,
+    link: Link,
+    id: BroadcastId,
+    session: Arc<Session>,
+    mut end: watch::Receiver<Option<BroadcastEnd>>,
+) {
+    let started = Instant::now();
+    let (mut rx, mut tx) = split(link);
+    let last_unit = AtomicU64::new(0);
+    let since_start =
+        |now: Instant| u64::try_from(now.duration_since(started).as_millis()).unwrap_or(u64::MAX);
+    let outcome = if tx.control(READY).await {
+        let mut first = true;
+        tokio::select! {
+            () = read_media(&mut rx, |message| {
+                let now = Instant::now();
+                last_unit.store(since_start(now), Ordering::Relaxed);
+                session.publisher_media(message, &relay.bandwidth, now)
+            }) => BroadcastEnd::Closed,
+            () = async {
+                loop {
+                    let bytes = session.to_publisher_media.next().await;
+                    let bytes = with_opening(&mut first, bytes);
+                    if !tx.unit(bytes).await {
+                        return;
+                    }
+                }
+            } => BroadcastEnd::Closed,
+            reason = ended(&mut end) => reason,
+            () = async {
+                let idle = relay.idle_timeout();
+                let mut tick = tokio::time::interval(Duration::from_secs(1));
+                loop {
+                    tick.tick().await;
+                    let quiet = since_start(Instant::now())
+                        .saturating_sub(last_unit.load(Ordering::Relaxed));
+                    if Duration::from_millis(quiet) >= idle {
+                        return;
+                    }
+                }
+            } => BroadcastEnd::Idle,
+        }
+    } else {
+        BroadcastEnd::Closed
+    };
+    relay.broadcasts.end(id, outcome);
+    tx.close(reason(Some(outcome))).await;
+    tracing::info!(
+        broadcast = %id,
+        media = true,
+        viewers = session.peak_viewers.load(Ordering::Relaxed),
+        duration_s = started.elapsed().as_secs(),
+        bytes_in = session.bytes_in.load(Ordering::Relaxed),
+        bytes_out = session.bytes_out.load(Ordering::Relaxed),
+        reason = reason(Some(outcome)),
+        "broadcast ended"
+    );
+}
+
+/// Runs a new-format subscriber link: control goes to the publisher, media comes from its queue.
+async fn run_subscriber_media(
+    relay: &Relay,
+    link: Link,
+    id: BroadcastId,
+    session: Arc<Session>,
+    subscriber: Arc<Subscriber>,
+    mut end: watch::Receiver<Option<BroadcastEnd>>,
+    leave: impl FnOnce(),
+) {
+    let (mut rx, mut tx) = split(link);
+    let mut first = true;
+    let outcome = if tx.control(READY).await {
+        // A late joiner gets the cached description before any frame.
+        if let Some(description) = session.description()
+            && !tx.unit(with_opening(&mut first, description)).await
+        {
+            session.remove(subscriber.slot);
+            leave();
+            tx.close("closed").await;
+            return;
+        }
+        tokio::select! {
+            () = read_media(&mut rx, |message| {
+                session.subscriber_media(&subscriber, message, Instant::now())
+            }) => BroadcastEnd::Closed,
+            () = async {
+                loop {
+                    let bytes = subscriber.media.next().await;
+                    let len = bytes.len();
+                    for bucket in [&session.outbound, &relay.bandwidth.total] {
+                        pace(|now| lock(bucket).spend(len, now)).await;
+                    }
+                    let bytes = with_opening(&mut first, bytes);
+                    if !tx.unit(bytes).await {
+                        return;
+                    }
+                    session.bytes_out.fetch_add(len as u64, Ordering::Relaxed);
+                    relay.count_bytes(len);
+                }
+            } => BroadcastEnd::Closed,
+            reason = ended(&mut end) => reason,
+        }
+    } else {
+        BroadcastEnd::Closed
+    };
+    session.remove(subscriber.slot);
+    leave();
+    tx.close(reason(Some(outcome))).await;
+    tracing::debug!(broadcast = %id, media = true, reason = reason(Some(outcome)), "subscriber left");
+}
+
+/// Prefixes the document opening to the first message written on a media link.
+fn with_opening(first: &mut bool, bytes: Bytes) -> Bytes {
+    if !*first {
+        return bytes;
+    }
+    *first = false;
+    let mut out = BytesMut::with_capacity(media::OPENING.len() + bytes.len());
+    out.put_slice(media::OPENING);
+    out.put_slice(&bytes);
+    out.freeze()
+}
+
+/// Reads complete new-format messages from a link and hands them to `on_message`.
+async fn read_media(rx: &mut Rx, mut on_message: impl FnMut(Message) -> bool) {
+    let mut reader = media::MessageReader::new();
+    match rx {
+        Rx::Quic(conn) => loop {
+            let Ok(mut stream) = conn.accept_uni().await else {
+                return;
+            };
+            let Ok(bytes) = stream.read_to_end(media::MAX_VIDEO_MESSAGE + 4096).await else {
+                return;
+            };
+            reader.push(&bytes);
+            loop {
+                match reader.next_message() {
+                    Ok(Some(message)) => {
+                        if !on_message(message) {
+                            return;
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(_) => return,
+                }
+            }
+        },
+        Rx::Tcp(rd, buf) => loop {
+            let Ok((kind, len)) = tcp::read_frame(rd, buf).await else {
+                return;
+            };
+            if kind != FRAME_PACKET {
+                continue;
+            }
+            reader.push(&buf[..len]);
+            loop {
+                match reader.next_message() {
+                    Ok(Some(message)) => {
+                        if !on_message(message) {
+                            return;
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(_) => return,
+                }
+            }
+        },
+    }
+}
+
 /// Runs one subscriber's link until it leaves, is removed or the broadcast ends.
 pub async fn run_subscriber(
     relay: &Relay,
@@ -528,6 +865,9 @@ pub async fn run_subscriber(
     mut end: watch::Receiver<Option<BroadcastEnd>>,
     leave: impl FnOnce(),
 ) {
+    if session.media() {
+        return run_subscriber_media(relay, link, id, session, subscriber, end, leave).await;
+    }
     let (mut rx, mut tx) = split(link);
     let outcome = if tx.control(READY).await {
         tokio::select! {
@@ -651,6 +991,81 @@ mod tests {
             ..PluginData::default()
         };
         Session::plugin_data(&limits, 300)
+    }
+
+    #[test]
+    fn new_media_routes_channels_and_control() {
+        let mut session = Session::new(15, 300);
+        session.set_media();
+        let a = session.add(3);
+        let b = session.add(4);
+        a.queue.with(|p| p.set_wanted_layer(0));
+        let now = Instant::now();
+        let total = total();
+
+        // Layer 0 reaches both; layer 2 only the subscriber that asked for it.
+        assert!(session.publisher_media(
+            Message {
+                channel: 1,
+                payload: vec![1, 2, 3],
+            },
+            &total,
+            now
+        ));
+        assert!(session.publisher_media(
+            Message {
+                channel: 3,
+                payload: vec![4, 5, 6],
+            },
+            &total,
+            now
+        ));
+        assert!(a.media.try_pop().is_some());
+        assert!(a.media.try_pop().is_none());
+        assert!(b.media.try_pop().is_some());
+        assert!(b.media.try_pop().is_some());
+
+        // A key is routed to its slot without the slot reaching the viewer.
+        assert!(session.publisher_media(
+            Message {
+                channel: 0,
+                payload: vec![2, 0, 4, 9, 9],
+            },
+            &total,
+            now
+        ));
+        let key = b.media.try_pop().expect("key");
+        let mut bytes = media::OPENING.to_vec();
+        bytes.extend_from_slice(&key);
+        let mut reader = media::MessageReader::new();
+        reader.push(&bytes);
+        let key_message = reader.next_message().expect("decode").expect("message");
+        assert_eq!(key_message.channel, 0);
+        assert_eq!(key_message.payload, vec![2, 9, 9]);
+
+        // A key request gets the subscriber's slot prepended.
+        assert!(session.subscriber_media(
+            &a,
+            Message {
+                channel: 0,
+                payload: vec![1, 7],
+            },
+            now
+        ));
+        assert!(session.to_publisher_media.try_pop().is_some());
+
+        // The description is cached and sent to everyone.
+        assert!(session.publisher_media(
+            Message {
+                channel: 0,
+                payload: vec![0, 1, 2, 3],
+            },
+            &total,
+            now
+        ));
+        assert_eq!(session.description().as_deref(), Some(&[0, 1, 2, 3][..]));
+        assert!(a.media.try_pop().is_some());
+        assert!(b.media.try_pop().is_some());
     }
 
     #[test]

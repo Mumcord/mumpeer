@@ -498,7 +498,7 @@ impl Relay {
 
     /// Takes over an authenticated link whose first control message was `bind_message`.
     pub async fn serve(self: Arc<Self>, link: Link, bind_message: &[u8], hash: &str, ip: IpAddr) {
-        let (token, role) = match parse_bind(bind_message) {
+        let (token, role, media) = match parse_bind(bind_message) {
             Ok(bind) => bind,
             Err(refusal) => return self.refuse(link, refusal, hash, ip).await,
         };
@@ -514,14 +514,14 @@ impl Relay {
             return self.refuse(link, Refusal::UseNotAllowed, hash, ip).await;
         }
         match role {
-            Role::Publisher => match self.broadcasts.bind_publisher(&token, hash) {
+            Role::Publisher => match self.broadcasts.bind_publisher(&token, hash, media) {
                 Ok(PublisherBind { id, session, end }) => {
                     tracing::debug!(broadcast = %id, "bound publisher");
                     broadcast::run_publisher(&self, link, id, session, end).await;
                 }
                 Err(refusal) => self.refuse(link, refusal, hash, ip).await,
             },
-            Role::Subscriber => match self.broadcasts.bind_viewer(&token, hash) {
+            Role::Subscriber => match self.broadcasts.bind_viewer(&token, hash, media) {
                 Ok(ViewerBind {
                     id,
                     session,
@@ -745,6 +745,8 @@ struct BindMessage {
     t: Option<String>,
     tok: Option<String>,
     role: Option<String>,
+    /// `2` for the new media document; absent means the legacy units.
+    media: Option<u64>,
 }
 
 /// Which side of a broadcast a link binds as; a bind without a role is a pair bind.
@@ -755,7 +757,7 @@ enum Role {
 }
 
 /// The token and role from a `bind` message (spec §6.5, spec 07 §6.6).
-fn parse_bind(message: &[u8]) -> Result<(String, Option<Role>), Refusal> {
+fn parse_bind(message: &[u8]) -> Result<(String, Option<Role>, bool), Refusal> {
     let message: BindMessage = serde_json::from_slice(message).map_err(|_| Refusal::BadRequest)?;
     if message.v != Some(1) {
         return Err(if message.v.is_some() {
@@ -770,6 +772,7 @@ fn parse_bind(message: &[u8]) -> Result<(String, Option<Role>), Refusal> {
         Some("sub") => Some(Role::Subscriber),
         Some(_) => return Err(Refusal::BadRequest),
     };
+    let media = message.media.is_some_and(|v| v >= 2);
     let token = message.tok.filter(|_| message.t.as_deref() == Some("bind"));
     match token {
         Some(token)
@@ -778,7 +781,7 @@ fn parse_bind(message: &[u8]) -> Result<(String, Option<Role>), Refusal> {
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') =>
         {
-            Ok((token, role))
+            Ok((token, role, media))
         }
         _ => Err(Refusal::BadRequest),
     }
@@ -842,10 +845,13 @@ mod tests {
     fn parses_bind() {
         let tok = "A".repeat(43);
         let ok = format!(r#"{{"v":1,"t":"bind","tok":"{tok}"}}"#);
-        assert_eq!(parse_bind(ok.as_bytes()), Ok((tok.clone(), None)));
+        assert_eq!(parse_bind(ok.as_bytes()), Ok((tok.clone(), None, false)));
         for (role, parsed) in [("pub", Role::Publisher), ("sub", Role::Subscriber)] {
             let bind = format!(r#"{{"v":1,"t":"bind","tok":"{tok}","role":"{role}"}}"#);
-            assert_eq!(parse_bind(bind.as_bytes()), Ok((tok.clone(), Some(parsed))));
+            assert_eq!(
+                parse_bind(bind.as_bytes()),
+                Ok((tok.clone(), Some(parsed), false))
+            );
         }
         let bad_role = format!(r#"{{"v":1,"t":"bind","tok":"{tok}","role":"viewer"}}"#);
         assert_eq!(parse_bind(bad_role.as_bytes()), Err(Refusal::BadRequest));
@@ -897,7 +903,7 @@ mod tests {
         // A full relay and a busy peer still get broadcasts (spec 07 FR-7.46).
         let (id, _) = relay
             .broadcasts
-            .create(A.into(), 25, BroadcastUse::ScreenShare)
+            .create(A.into(), 25, BroadcastUse::ScreenShare, false)
             .unwrap();
         relay.broadcasts.admit(id, C.into()).unwrap();
         assert!(relay.allowed(C));

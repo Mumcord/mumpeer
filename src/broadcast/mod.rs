@@ -3,6 +3,7 @@
 //! through the API; the registry keeps them in memory only, like pairs.
 
 pub mod control;
+pub mod media;
 mod queue;
 mod registry;
 mod session;

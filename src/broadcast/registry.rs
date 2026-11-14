@@ -109,6 +109,8 @@ impl Viewer {
 /// One broadcast. `publisher_bound` is set once the publisher link is bound.
 struct Broadcast {
     use_: BroadcastUse,
+    /// The broadcast uses the new media document.
+    media: bool,
     publisher: String,
     publisher_token: [u8; 32],
     expires_at: Instant,
@@ -212,6 +214,7 @@ impl Registry {
         publisher: String,
         max_viewers: u16,
         use_: BroadcastUse,
+        media: bool,
     ) -> Result<(BroadcastId, String), CreateError> {
         let mut broadcasts = lock(&self.broadcasts);
         let max = match use_ {
@@ -229,15 +232,19 @@ impl Registry {
             }
         };
         let token = base64url(&random::<32>());
-        let session = match use_ {
+        let mut session = match use_ {
             BroadcastUse::ScreenShare => Session::new(self.in_mbit, self.out_mbit),
             BroadcastUse::Camera => Session::camera(self.camera_max_kbps, self.out_mbit),
             BroadcastUse::PluginData => Session::plugin_data(&self.plugin_data, self.out_mbit),
         };
+        if media {
+            session.set_media();
+        }
         broadcasts.insert(
             id,
             Broadcast {
                 use_,
+                media,
                 publisher,
                 publisher_token: sha256(token.as_bytes()),
                 expires_at: Instant::now() + self.token_ttl,
@@ -314,13 +321,21 @@ impl Registry {
     }
 
     /// Binds the publisher link of the broadcast with this token.
-    pub fn bind_publisher(&self, token: &str, hash: &str) -> Result<PublisherBind, Refusal> {
+    pub fn bind_publisher(
+        &self,
+        token: &str,
+        hash: &str,
+        media: bool,
+    ) -> Result<PublisherBind, Refusal> {
         let key = sha256(token.as_bytes());
         let mut broadcasts = lock(&self.broadcasts);
         let (id, broadcast) = broadcasts
             .iter_mut()
             .find(|(_, b)| b.publisher_token == key)
             .ok_or(Refusal::UnknownToken)?;
+        if broadcast.media != media {
+            return Err(Refusal::BadRequest);
+        }
         if !self.uses.allows(broadcast.use_.name()) {
             return Err(Refusal::UseNotAllowed);
         }
@@ -339,13 +354,16 @@ impl Registry {
     }
 
     /// Binds a subscriber link and gives it a slot, unique within its broadcast.
-    pub fn bind_viewer(&self, token: &str, hash: &str) -> Result<ViewerBind, Refusal> {
+    pub fn bind_viewer(&self, token: &str, hash: &str, media: bool) -> Result<ViewerBind, Refusal> {
         let key = sha256(token.as_bytes());
         let mut broadcasts = lock(&self.broadcasts);
         let (id, broadcast) = broadcasts
             .iter_mut()
             .find(|(_, b)| b.viewers.values().any(|v| v.token == key))
             .ok_or(Refusal::UnknownToken)?;
+        if broadcast.media != media {
+            return Err(Refusal::BadRequest);
+        }
         if !self.uses.allows(broadcast.use_.name()) {
             return Err(Refusal::UseNotAllowed);
         }
@@ -482,16 +500,16 @@ mod tests {
     fn create_respects_max_broadcasts() {
         let registry = registry("max_broadcasts = 2");
         assert_eq!(registry.max_viewers(), Some(25));
-        let (a, token) = registry.create(P.into(), 25, SCREEN).unwrap();
+        let (a, token) = registry.create(P.into(), 25, SCREEN, false).unwrap();
         assert_eq!(token.len(), 43);
-        let (b, _) = registry.create(P.into(), 25, SCREEN).unwrap();
+        let (b, _) = registry.create(P.into(), 25, SCREEN, false).unwrap();
         assert_ne!(a, b);
         assert_eq!(
-            registry.create(V.into(), 25, SCREEN),
+            registry.create(V.into(), 25, SCREEN, false),
             Err(CreateError::RelayFull)
         );
         registry.delete(a);
-        assert!(registry.create(V.into(), 25, SCREEN).is_ok());
+        assert!(registry.create(V.into(), 25, SCREEN, false).is_ok());
         assert_eq!(registry.count(), 2);
 
         // Camera broadcasts alone keep `max_viewers` announced.
@@ -500,7 +518,7 @@ mod tests {
         let off = self::registry("max_broadcasts = 0\nmax_camera_broadcasts = 0");
         assert_eq!(off.max_viewers(), None);
         assert_eq!(
-            off.create(P.into(), 25, SCREEN),
+            off.create(P.into(), 25, SCREEN, false),
             Err(CreateError::RelayFull)
         );
     }
@@ -508,7 +526,7 @@ mod tests {
     #[test]
     fn admit_caps_viewers_at_the_smaller_limit() {
         let registry = registry("max_viewers_per_broadcast = 2");
-        let (id, _) = registry.create(P.into(), 10, SCREEN).unwrap();
+        let (id, _) = registry.create(P.into(), 10, SCREEN, false).unwrap();
         assert_eq!(registry.admit(id, P.into()), Err(AdmitError::Publisher));
         assert_eq!(registry.admit(id, V.into()).unwrap().len(), 43);
         assert!(registry.admit(id, W.into()).is_ok());
@@ -524,7 +542,7 @@ mod tests {
         registry.remove_viewer(id, W);
         assert!(registry.admit(id, third).is_ok());
 
-        let (small, _) = registry.create(P.into(), 1, SCREEN).unwrap();
+        let (small, _) = registry.create(P.into(), 1, SCREEN, false).unwrap();
         assert!(registry.admit(small, V.into()).is_ok());
         assert_eq!(
             registry.admit(small, W.into()),
@@ -539,7 +557,7 @@ mod tests {
     #[test]
     fn expired_viewer_tokens_free_their_seat() {
         let registry = registry("max_viewers_per_broadcast = 1");
-        let (id, _) = registry.create(P.into(), 1, SCREEN).unwrap();
+        let (id, _) = registry.create(P.into(), 1, SCREEN, false).unwrap();
         registry.admit(id, V.into()).unwrap();
         lock(&registry.broadcasts)
             .get_mut(&id)
@@ -555,7 +573,7 @@ mod tests {
     #[test]
     fn removals_signal_the_links() {
         let registry = registry("");
-        let (id, _) = registry.create(P.into(), 25, SCREEN).unwrap();
+        let (id, _) = registry.create(P.into(), 25, SCREEN, false).unwrap();
         registry.admit(id, V.into()).unwrap();
         registry.admit(id, W.into()).unwrap();
         let v = viewer_end(&registry, id, V);
@@ -579,8 +597,8 @@ mod tests {
     #[test]
     fn drop_peer_ends_its_broadcasts_and_views() {
         let registry = registry("");
-        let (own, _) = registry.create(P.into(), 25, SCREEN).unwrap();
-        let (other, _) = registry.create(V.into(), 25, SCREEN).unwrap();
+        let (own, _) = registry.create(P.into(), 25, SCREEN, false).unwrap();
+        let (other, _) = registry.create(V.into(), 25, SCREEN, false).unwrap();
         registry.admit(own, W.into()).unwrap();
         registry.admit(other, P.into()).unwrap();
         let own_end = broadcast_end(&registry, own);
@@ -599,7 +617,7 @@ mod tests {
     #[test]
     fn sweep_forgets_unused_broadcasts() {
         let registry = registry("");
-        let (id, _) = registry.create(P.into(), 25, SCREEN).unwrap();
+        let (id, _) = registry.create(P.into(), 25, SCREEN, false).unwrap();
         registry.admit(id, V.into()).unwrap();
         let end = broadcast_end(&registry, id);
         registry.sweep(Instant::now());
@@ -612,7 +630,7 @@ mod tests {
     #[test]
     fn sweep_keeps_bound_publishers_and_viewers() {
         let registry = registry("");
-        let (id, _) = registry.create(P.into(), 25, SCREEN).unwrap();
+        let (id, _) = registry.create(P.into(), 25, SCREEN, false).unwrap();
         registry.admit(id, V.into()).unwrap();
         registry.admit(id, W.into()).unwrap();
         {
@@ -629,28 +647,28 @@ mod tests {
     #[test]
     fn binds_give_unique_slots_and_survive_re_admission() {
         let registry = registry("");
-        let (id, token) = registry.create(P.into(), 25, SCREEN).unwrap();
+        let (id, token) = registry.create(P.into(), 25, SCREEN, false).unwrap();
         assert_eq!(
-            registry.bind_publisher(&token, V).err(),
+            registry.bind_publisher(&token, V, false).err(),
             Some(Refusal::NotAllowed)
         );
-        assert!(registry.bind_publisher(&token, P).is_ok());
+        assert!(registry.bind_publisher(&token, P, false).is_ok());
         assert_eq!(
-            registry.bind_publisher(&token, P).err(),
+            registry.bind_publisher(&token, P, false).err(),
             Some(Refusal::NotAllowed)
         );
 
         let v_token = registry.admit(id, V.into()).unwrap();
         let w_token = registry.admit(id, W.into()).unwrap();
-        let v = registry.bind_viewer(&v_token, V).unwrap();
-        let w = registry.bind_viewer(&w_token, W).unwrap();
+        let v = registry.bind_viewer(&v_token, V, false).unwrap();
+        let w = registry.bind_viewer(&w_token, W, false).unwrap();
         assert_ne!(v.subscriber.slot, w.subscriber.slot);
         assert_eq!(
-            registry.bind_viewer(&v_token, V).err(),
+            registry.bind_viewer(&v_token, V, false).err(),
             Some(Refusal::NotAllowed)
         );
         assert_eq!(
-            registry.bind_viewer(&"A".repeat(43), V).err(),
+            registry.bind_viewer(&"A".repeat(43), V, false).err(),
             Some(Refusal::UnknownToken)
         );
 
@@ -670,15 +688,15 @@ mod tests {
         let registry = registry(
             "max_broadcasts = 1\n[uses]\nplugin_data = true\n[plugin_data]\nmax_broadcasts = 2",
         );
-        assert!(registry.create(P.into(), 25, SCREEN).is_ok());
+        assert!(registry.create(P.into(), 25, SCREEN, false).is_ok());
         assert_eq!(
-            registry.create(V.into(), 25, SCREEN),
+            registry.create(V.into(), 25, SCREEN, false),
             Err(CreateError::RelayFull)
         );
-        assert!(registry.create(P.into(), 8, PLUGIN).is_ok());
-        assert!(registry.create(V.into(), 8, PLUGIN).is_ok());
+        assert!(registry.create(P.into(), 8, PLUGIN, false).is_ok());
+        assert!(registry.create(V.into(), 8, PLUGIN, false).is_ok());
         assert_eq!(
-            registry.create(W.into(), 8, PLUGIN),
+            registry.create(W.into(), 8, PLUGIN, false),
             Err(CreateError::RelayFull)
         );
         assert_eq!(registry.count(), 3);
@@ -686,7 +704,7 @@ mod tests {
         // Screen sharing off does not stop plugin-data broadcasts.
         let plugins_only =
             self::registry("max_broadcasts = 0\n[uses]\nscreen_share = false\nplugin_data = true");
-        assert!(plugins_only.create(P.into(), 8, PLUGIN).is_ok());
+        assert!(plugins_only.create(P.into(), 8, PLUGIN, false).is_ok());
     }
 
     #[test]
@@ -694,47 +712,47 @@ mod tests {
         // Broadcasts that exist when the use is off can only come from an older config; the
         // check keeps a bind from carrying a use the operator did not allow.
         let registry = registry("[uses]\nscreen_share = false\nplugin_data = false");
-        let (id, token) = registry.create(P.into(), 25, SCREEN).unwrap();
+        let (id, token) = registry.create(P.into(), 25, SCREEN, false).unwrap();
         let viewer = registry.admit(id, V.into()).unwrap();
         assert_eq!(
-            registry.bind_publisher(&token, P).err(),
+            registry.bind_publisher(&token, P, false).err(),
             Some(Refusal::UseNotAllowed)
         );
         assert_eq!(
-            registry.bind_viewer(&viewer, V).err(),
+            registry.bind_viewer(&viewer, V, false).err(),
             Some(Refusal::UseNotAllowed)
         );
-        let (_, plugin) = registry.create(P.into(), 8, PLUGIN).unwrap();
+        let (_, plugin) = registry.create(P.into(), 8, PLUGIN, false).unwrap();
         assert_eq!(
-            registry.bind_publisher(&plugin, P).err(),
+            registry.bind_publisher(&plugin, P, false).err(),
             Some(Refusal::UseNotAllowed)
         );
 
         let on = self::registry("[uses]\nplugin_data = true");
-        let (_, plugin) = on.create(P.into(), 8, PLUGIN).unwrap();
-        assert!(on.bind_publisher(&plugin, P).is_ok());
+        let (_, plugin) = on.create(P.into(), 8, PLUGIN, false).unwrap();
+        assert!(on.bind_publisher(&plugin, P, false).is_ok());
     }
 
     #[test]
     fn cameras_have_their_own_cap_and_announcement() {
         let registry = registry("max_broadcasts = 1\nmax_camera_broadcasts = 2");
         assert_eq!(registry.max_camera(), 2);
-        assert!(registry.create(P.into(), 25, SCREEN).is_ok());
-        assert!(registry.create(P.into(), 25, CAMERA).is_ok());
-        assert!(registry.create(V.into(), 25, CAMERA).is_ok());
+        assert!(registry.create(P.into(), 25, SCREEN, false).is_ok());
+        assert!(registry.create(P.into(), 25, CAMERA, false).is_ok());
+        assert!(registry.create(V.into(), 25, CAMERA, false).is_ok());
         assert_eq!(
-            registry.create(W.into(), 25, CAMERA),
+            registry.create(W.into(), 25, CAMERA, false),
             Err(CreateError::RelayFull)
         );
         assert_eq!(
-            registry.create(W.into(), 25, SCREEN),
+            registry.create(W.into(), 25, SCREEN, false),
             Err(CreateError::RelayFull)
         );
         assert_eq!(registry.count(), 3);
 
         // `max_viewers_per_broadcast` caps cameras too.
         let capped = self::registry("max_viewers_per_broadcast = 2");
-        let (id, _) = capped.create(P.into(), 25, CAMERA).unwrap();
+        let (id, _) = capped.create(P.into(), 25, CAMERA, false).unwrap();
         assert!(capped.admit(id, V.into()).is_ok());
         assert!(capped.admit(id, W.into()).is_ok());
         assert_eq!(
@@ -745,9 +763,9 @@ mod tests {
         let no_camera = self::registry("max_broadcasts = 0\n[uses]\ncamera = false");
         assert_eq!(no_camera.max_camera(), 0);
         assert_eq!(no_camera.max_viewers(), None);
-        let (_, token) = no_camera.create(P.into(), 25, CAMERA).unwrap();
+        let (_, token) = no_camera.create(P.into(), 25, CAMERA, false).unwrap();
         assert_eq!(
-            no_camera.bind_publisher(&token, P).err(),
+            no_camera.bind_publisher(&token, P, false).err(),
             Some(Refusal::UseNotAllowed)
         );
     }
