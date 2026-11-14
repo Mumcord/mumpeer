@@ -66,3 +66,27 @@ jobs:
 
       - name: Status check
         run: scripts/ci/image-check.sh mumpeer:ci
+
+      # The release workflow runs this script only on a tag; run it here so it cannot break
+      # unnoticed. The image built above stands in for the released one (amd64 only).
+      - name: Read tool versions
+        id: tools
+        run: grep '^[A-Z_]*=' scripts/tools.env >> "$GITHUB_OUTPUT"
+
+      - id: cyclonedx
+        uses: actions/cache@v6
+        with:
+          path: ~/.cargo/bin/cargo-cyclonedx
+          key: cargo-cyclonedx-${{ runner.os }}-${{ runner.arch }}-${{ steps.tools.outputs.CARGO_CYCLONEDX_VERSION }}
+
+      - name: Install cargo-cyclonedx
+        if: steps.cyclonedx.outputs.cache-hit != 'true'
+        env:
+          VERSION: ${{ steps.tools.outputs.CARGO_CYCLONEDX_VERSION }}
+        run: cargo install cargo-cyclonedx --version "$VERSION" --locked
+
+      - name: Generate SBOMs
+        run: |
+          scripts/generate-sbom.sh 0.0.0 sbom
+          ARCHS=x86_64 scripts/generate-sbom.sh 0.0.0 sbom mumpeer:ci
+          ls -l sbom
