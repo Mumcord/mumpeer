@@ -132,6 +132,10 @@ for arch in $archs; do
   alpine="$(docker cp "$container:/etc/alpine-release" - | tar -xO)"
   docker rm "$container" >/dev/null
   container=""
+  # The image is a multi-platform index pinned by digest; with the containerd image store,
+  # pulling that same digest again for the next platform fails with "cannot overwrite digest"
+  # while the previous platform's copy is still there.
+  docker image rm "$image" >/dev/null 2>&1 || true
   [ -n "$alpine" ] || fail "Alpine version not found in $image"
 
   # One record per package, fields as "X:value" lines: name, version, architecture, licence, text.
