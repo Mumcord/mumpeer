@@ -21,8 +21,8 @@
 - **Pair tokens.** The bot asks for a pair of two certificate hashes and gets a 256-bit random
   token. Only those two certificates can use it, each side once, within 120 seconds by default.
   The relay keeps only a SHA-256 hash of the token.
-- **No open proxy.** The relay forwards only between the two bound sides of one pair, or from the sharer of a broadcast to its admitted viewers, and never
-  opens a connection itself.
+- **No open proxy.** The relay forwards only between the two bound sides of one pair, or from the sharer of a broadcast to its admitted viewers, and never opens a
+  connection itself.
 
 ## The bot API
 
@@ -37,6 +37,14 @@
 Bandwidth per session and in total, sessions overall and per certificate, new connections and
 failed handshakes per source address (IPv6 per /64), and pairs per minute. All configurable,
 see [[Configuration]].
+
+## Broadcasts and plugin data
+
+Screen-share, camera and plugin-data broadcasts are created only by your bot. The relay copies
+them without being able to read them (end-to-end encryption). Plugin data is on by default
+since 0.2.1; set `[uses] plugin_data = false` to turn it off. With the media profile (0.3.0) the
+relay also keeps the latest, still encrypted, stream description of a broadcast in memory so late
+joiners receive it; it is dropped when the broadcast ends.
 
 ## What the operator can see
 
@@ -58,6 +66,19 @@ before they use a relay. Voice and text never go through the relay.
   characters of certificate hashes.
 - **Never logged:** full IP addresses, full certificate hashes, tokens, the API secret, packet
   contents.
+
+## Supply chain
+
+Every release ships a software bill of materials (SBOM, CycloneDX JSON) for each binary and each
+Docker image platform, so you can see exactly which crates and libraries are inside. Downloads
+are listed with checksums in `SHA256SUMS`.
+
+## Reporting a vulnerability
+
+Do not report vulnerabilities in public issues. Use the private
+[security advisory form](https://github.com/Mumcord/mumpeer/security/advisories/new). Fixes are
+made for the latest release only. See the
+[security policy](https://github.com/Mumcord/mumpeer/blob/main/SECURITY.md).
 
 ## Operator checklist
 

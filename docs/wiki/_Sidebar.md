@@ -7,6 +7,7 @@
 
 **Understand**
 - [[Security and privacy]]
+- [Security policy](https://github.com/Mumcord/mumpeer/blob/main/SECURITY.md)
 
 **Help**
 - [[Troubleshooting]]

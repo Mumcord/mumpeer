@@ -34,7 +34,7 @@ images = true        # full-size image transfers
 files = true         # file transfers
 screen_share = true  # screen sharing
 camera = true        # camera sharing (broadcasts only)
-plugin_data = false  # data of Mumcord plugins, off by default
+plugin_data = true   # data of Mumcord plugins
 
 [plugin_data]        # only used when plugin_data = true
 max_kbps_per_sender = 512  # sustained upload per sender, announced to clients
@@ -43,10 +43,17 @@ max_share_percent = 25     # share of limits.total_mbit for plugin data (1-100)
 max_unit_bytes = 65536     # largest single data unit (at most 1048576)
 ```
 
-`images`, `files` and `screen_share` are optional and default to `true`, so a config without
-this section relays everything. Set a switch to `false` to keep that kind of traffic off your
-relay. `plugin_data` is the exception: it defaults to `false` and relays nothing until you set
-it to `true`. All `[plugin_data]` values must be greater than 0.
+All switches are optional and default to `true`, so a config without this section relays
+everything. Set a switch to `false` to keep that kind of traffic off your relay.
+
+**Upgrading from 0.2.0 or earlier:** since 0.2.1, `plugin_data` also defaults to `true` (in
+0.2.0 it was off by default). A relay without `plugin_data = false` in its config now relays
+plugin data. Add `plugin_data = false` under `[uses]` if you do not want that. All
+`[plugin_data]` values must be greater than 0.
+
+Plugin data has the lowest priority: it only uses bandwidth the other uses leave free, so voice,
+screen sharing, images and files are never held up by it. Details in the
+[wire and handshake overview](https://github.com/Mumcord/mumpeer/blob/main/docs/protocol.md#bandwidth).
 
 What users see: the enabled uses are announced to Mumcord through the bot. For a disabled use,
 Mumcord does not try the relay. The matching control is disabled with a reason shown, for example
@@ -72,7 +79,7 @@ failed_per_ip_per_min = 10  # then the address is blocked for 10 minutes
 pairs_per_min = 120         # pairs the bot may create
 max_broadcasts = 4          # screen-share broadcasts at once; 0 = off
 max_camera_broadcasts = 18  # camera broadcasts at once; 0 = off
-max_viewers_per_broadcast = 25  # viewers per broadcast
+max_viewers_per_broadcast = 25  # viewers per broadcast (screen shares and cameras)
 broadcast_in_mbit = 15      # sharer upload per broadcast
 broadcast_out_mbit = 300    # all copies of one broadcast; counts against total_mbit
 camera_max_kbps = 2500      # sender upload per camera broadcast
@@ -82,7 +89,7 @@ IPv6 sources are counted per /64. Set `total_mbit` below your uplink.
 
 ## Broadcasts
 
-A **broadcast** is a screen share that one user shows to many people at once. Without it, the
+A **broadcast** is a screen share or a camera that one user shows to many people at once. Without it, the
 sharer would have to upload the picture once per viewer, which quickly exceeds a home
 connection. With a broadcast the sharer uploads **one** stream to your relay and the relay
 copies it to each admitted viewer, up to 25 by default. The sharer's upload stays the same no
@@ -106,13 +113,27 @@ Things to know:
 - Broadcasts do not count against `max_sessions` or `max_sessions_per_peer`.
 - Screen-share broadcasts need `screen_share = true` in `[uses]`, camera broadcasts
   `camera = true`. When neither is possible (off in `[uses]` or a limit of 0),
-  `GET /v1/status` has no `broadcast` field and Mumcord offers no broadcast through your
-  relay.
+  `GET /v1/status` has no `broadcast` field and Mumcord offers no broadcast through your relay.
 - Size your uplink: one full broadcast at the defaults can send up to 300 Mbit/s out. Keep
   `total_mbit` below what your server can really send, and lower `broadcast_out_mbit` or
   `max_viewers_per_broadcast` if needed.
 - The relay copies the sharer's video and audio to every admitted viewer. The stream stays
   end-to-end encrypted, so the relay cannot read it.
+
+### Media profile (0.3.0)
+
+Since 0.3.0 the relay supports the media profile for broadcasts. There is nothing to configure:
+when broadcasts are available, `GET /v1/status` advertises it (`media`), and a publisher that
+asks for it (`media` in `POST /v1/broadcasts`) gets the new behaviour:
+
+- The relay **routes media by channel**: it reads only the channel and keyframe flag from the
+  message framing, which lets it drop whole temporal video layers for a slow viewer.
+- It **reassembles media messages** and keeps a **bounded queue per viewer**, so one slow
+  viewer never holds up the others.
+- It **caches the latest stream description** of a broadcast (up to 8 KiB, still encrypted) and
+  hands it to viewers who join late. The cache ends with the broadcast.
+
+The payloads stay end-to-end encrypted; the relay cannot read them.
 
 ## Environment
 

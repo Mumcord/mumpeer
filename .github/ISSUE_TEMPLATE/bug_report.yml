@@ -29,7 +29,7 @@ body:
     attributes:
       label: mumpeer version
       description: Output of `mumpeer --version`
-      placeholder: "0.2.1"
+      placeholder: "0.3.0"
     validations:
       required: true
   - type: dropdown
@@ -50,7 +50,7 @@ body:
     id: runtime
     attributes:
       label: How do you run it? Binary and OS, or Docker image tag
-      placeholder: "Binary on Debian 12, or ghcr.io/mumcord/mumpeer:0.2.1"
+      placeholder: "Binary on Debian 12, or ghcr.io/mumcord/mumpeer:0.3.0"
     validations:
       required: true
   - type: textarea

@@ -31,7 +31,7 @@ default. The secret never goes into the config.
 ```yaml
 services:
   mumpeer:
-    image: ghcr.io/mumcord/mumpeer:0.1.0
+    image: ghcr.io/mumcord/mumpeer:0.3.0
     restart: unless-stopped
     environment:
       MUMPEER_API_SECRET: ${PEER_API_SECRET:?set PEER_API_SECRET in .env}
@@ -41,7 +41,7 @@ services:
       - mumpeer-data:/var/lib/mumpeer
 
   mumbot:
-    image: ghcr.io/mumcord/mumbot:0.1.0
+    image: ghcr.io/mumcord/mumbot:0.6.0
     command: ["peer"]
     restart: unless-stopped
     network_mode: "service:mumpeer"   # reaches the API on 127.0.0.1:7480
@@ -80,7 +80,10 @@ and every user would see "The relay of this server changed".
 
 ## Without Docker
 
-Download the static binary from the [releases](https://github.com/Mumcord/mumpeer/releases)
-and run it as a systemd service: see [[Operating]].
+Download `mumpeer-<version>-linux-x86_64.tar.gz` or `mumpeer-<version>-linux-aarch64.tar.gz`
+(static binary, any Linux distribution) from the
+[releases](https://github.com/Mumcord/mumpeer/releases), check it with
+`sha256sum -c SHA256SUMS --ignore-missing`, and run it as a systemd service: see [[Operating]].
+Pin a version tag (`0.3.0`) in production; `latest` follows the newest stable release.
 
 Next: [[Configuration]] · [[Operating]] · [[Security and privacy]]

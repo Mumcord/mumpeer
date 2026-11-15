@@ -38,7 +38,7 @@ mumpeer never connects to the Mumble server; only the bot does.
 ### Docker image
 
 ```sh
-docker pull ghcr.io/mumcord/mumpeer:0.1.0
+docker pull ghcr.io/mumcord/mumpeer:0.3.0
 ```
 
 Multi-arch (amd64, arm64), Alpine based, runs as uid 10001. It reads
@@ -47,7 +47,7 @@ Multi-arch (amd64, arm64), Alpine based, runs as uid 10001. It reads
 ### Static binary
 
 ```sh
-VERSION=0.1.0
+VERSION=0.3.0
 ARCH=x86_64        # or aarch64
 curl -fsSLO "https://github.com/Mumcord/mumpeer/releases/download/v$VERSION/mumpeer-$VERSION-linux-$ARCH.tar.gz"
 curl -fsSLO "https://github.com/Mumcord/mumpeer/releases/download/v$VERSION/SHA256SUMS"
@@ -101,7 +101,7 @@ The relay part:
 ```yaml
 services:
   mumpeer:
-    image: ghcr.io/mumcord/mumpeer:0.1.0
+    image: ghcr.io/mumcord/mumpeer:0.3.0
     restart: unless-stopped
     environment:
       MUMPEER_API_SECRET: ${PEER_API_SECRET:?set PEER_API_SECRET in .env}
@@ -137,7 +137,7 @@ docker run -d --name mumpeer --restart unless-stopped \
   -v /etc/mumpeer/mumpeer.toml:/config/mumpeer.toml:ro \
   -v /etc/mumpeer/api_secret:/run/secrets/mumpeer_api_secret:ro \
   -v mumpeer-data:/var/lib/mumpeer \
-  ghcr.io/mumcord/mumpeer:0.1.0
+  ghcr.io/mumcord/mumpeer:0.3.0
 ```
 
 With `api_secret_file = "/run/secrets/mumpeer_api_secret"` in the config (the example's
@@ -307,7 +307,7 @@ At `info`:
 | Line | When |
 | --- | --- |
 | `generated a new relay identity in …` | First start only |
-| `mumpeer 0.1.0 relay for relay.example.org: UDP …, TCP …, API …; limits: …` | Start: version, address, listeners, main limits |
+| `mumpeer 0.3.0 relay for relay.example.org: UDP …, TCP …, API …; limits: …` | Start: version, address, listeners, main limits |
 | `relay fingerprint (SHA-256): …` | Start |
 | `totals sessions=… bytes=…` | Every 5 minutes |
 | `session ended session=… transports=udp/tcp duration_s=… bytes_ab=… bytes_ba=… dropped=… reason=…` | One per finished session |

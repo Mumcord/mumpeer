@@ -92,6 +92,11 @@ one sharer and several viewers instead of a pair; see the
   viewers without being able to read it. Camera sharing uses the same broadcasts (`camera`
   allowed, up to `max_camera_broadcasts` cameras, each capped at `camera_max_kbps`). See the
   [wiki](https://github.com/Mumcord/mumpeer/wiki/Configuration#broadcasts).
+- **Media profile (0.3.0):** for publishers that ask for it (`media` in `POST /v1/broadcasts`),
+  the relay routes the media link by the channels the profile declares, reassembles media
+  messages into per-viewer queues, and keeps the latest stream description of a broadcast so
+  viewers who join late receive it. When broadcasts are available, `GET /v1/status` advertises
+  the profile as `media`. The relay still cannot read the payloads.
 - **Plugin data:** Mumcord plugins can exchange data through the relay (pairs and broadcasts
   with `use = plugin_data`). It is **on by default**: set `[uses] plugin_data = false` to turn it off.
   `[plugin_data]` limits it: `max_kbps_per_sender` (512, announced to clients), `max_broadcasts`
@@ -132,7 +137,8 @@ each other, and how much data flows and when. They cannot see the contents. Mumc
 users this before they use a relay. Pairs, sessions and counters live in memory only; the only
 files the relay writes are its own key and certificate.
 
-More: [Security & privacy](docs/wiki/Security-and-privacy.md). Operator guides for every topic are
+To report a vulnerability, follow the [security policy](SECURITY.md); fixes are made for the
+latest release. More: [Security & privacy](docs/wiki/Security-and-privacy.md). Operator guides for every topic are
 in the [wiki](https://github.com/Mumcord/mumpeer/wiki).
 
 ## Quick start
@@ -158,7 +164,7 @@ docker run -d --name mumpeer --restart unless-stopped \
   -v "$PWD/mumpeer.toml:/config/mumpeer.toml:ro" \
   -v "$PWD/api_secret:/run/secrets/mumpeer_api_secret:ro" \
   -v mumpeer-data:/var/lib/mumpeer \
-  ghcr.io/mumcord/mumpeer:0.1.0
+  ghcr.io/mumcord/mumpeer:0.3.0
 
 docker logs mumpeer 2>&1 | grep fingerprint
 # relay fingerprint (SHA-256): 3f…a9
@@ -175,7 +181,7 @@ the API never leaves the pair:
 ```yaml
 services:
   mumpeer:
-    image: ghcr.io/mumcord/mumpeer:0.1.0
+    image: ghcr.io/mumcord/mumpeer:0.3.0
     restart: unless-stopped
     environment:
       MUMPEER_API_SECRET: ${PEER_API_SECRET:?set PEER_API_SECRET in .env}
@@ -185,7 +191,7 @@ services:
       - mumpeer-data:/var/lib/mumpeer
 
   mumbot:
-    image: ghcr.io/mumcord/mumbot:0.1.0
+    image: ghcr.io/mumcord/mumbot:0.6.0
     command: ["peer"]
     restart: unless-stopped
     network_mode: "service:mumpeer"
@@ -292,7 +298,7 @@ the [releases page](https://github.com/Mumcord/mumpeer/releases), and as a multi
 image:
 
 ```sh
-docker pull ghcr.io/mumcord/mumpeer:0.1.0
+docker pull ghcr.io/mumcord/mumpeer:0.3.0
 ```
 
 `latest` follows the newest stable version; pre-releases (`-rc.N`) never move it. Pin a version
@@ -329,7 +335,7 @@ docker build -t mumpeer:dev .
 network namespaces that block direct connections or UDP. Never test against public servers or
 relays.
 
-Contributions are welcome. Keep changes small and focused, with tests for new logic, and use
+Contributions are welcome; see [`CONTRIBUTING.md`](CONTRIBUTING.md). Keep changes small and focused, with tests for new logic, and use
 [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `docs:` …).
 User-visible changes get a line in [`CHANGELOG.md`](CHANGELOG.md). The behaviour follows the
 relay specification in Mumcord (`specs/04-mumpeer-relay-specification.md`); open an issue
@@ -341,11 +347,11 @@ Maintainers only. A release is built by pushing a version tag; publishing stays 
 
 1. Set the new version in `Cargo.toml`, run `cargo check` so `Cargo.lock` follows, and move the
    `[Unreleased]` entries in `CHANGELOG.md` under the new version. Merge this to `main`.
-2. Tag the merge commit and push the tag: `git tag v0.2.0 && git push origin v0.2.0`.
+2. Tag the merge commit and push the tag: `git tag v<version> && git push origin v<version>`.
 3. The `Release` workflow checks that the tag matches the Cargo version and points to a commit
    on `main`, builds static Linux binaries (x86_64 and aarch64), and pushes the multi-arch image
    to `ghcr.io/mumcord/mumpeer` with the version tag. Plain versions also move `latest`;
-   pre-release tags such as `v0.2.0-rc.1` do not.
+   pre-release tags such as `v<version>-rc.1` do not.
 4. The workflow writes the SBOMs (see [SBOM](#sbom)) from the tagged commit and the pushed image.
 5. The workflow creates a **draft** GitHub release with the binaries, the SBOMs and `SHA256SUMS`.
    Review it and publish it by hand.
