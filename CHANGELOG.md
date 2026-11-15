@@ -6,11 +6,22 @@ All notable changes to mumpeer are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-15
+
 ### Added
 
+- Broadcast media profile: the relay routes new media links by the channels the profile declares,
+  advertises the profile, reassembles media messages into queues, and keeps the latest description
+  of a broadcast so late joiners receive it.
 - Releases include a software bill of materials (SBOM, CycloneDX JSON) for each binary and each
   Docker image platform: `mumpeer-<version>-linux-<arch>.cdx.json` and
   `mumpeer-<version>-docker-<platform>.cdx.json`, listed in `SHA256SUMS`.
+- Contributing guide, security policy, and issue and pull request templates.
+
+### Changed
+
+- The release workflow reads the builder image from the Dockerfile, so dependency bumps of the
+  builder no longer break the SBOM step.
 
 ## [0.2.1] - 2026-11-08
 
