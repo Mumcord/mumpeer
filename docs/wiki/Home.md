@@ -1,7 +1,7 @@
 <p align="center"><img src="https://raw.githubusercontent.com/Mumcord/mumpeer/main/assets/mumpeer-banner.svg" alt="mumpeer: the relay for Mumcord's peer-to-peer features" width="560"></p>
 
 **mumpeer** is a small relay server for [Mumcord](https://github.com/Mumcord/mumcord)'s
-peer-to-peer features: screen sharing and full-size images. A Mumble community runs it next to
+peer-to-peer features: screen sharing, camera sharing, full-size images, files and Mumcord plugin data. A Mumble community runs it next to
 its Mumble server, together with the relay bot
 [`mumbot peer`](https://github.com/Mumcord/mumbot). When two users cannot connect directly
 (NAT, carrier-grade NAT, strict firewalls) or a user wants to hide their IP address, both
@@ -11,6 +11,8 @@ connect to the relay, and it forwards their end-to-end encrypted packets to each
 - The **relay cannot read** what it forwards; it only sees encrypted bytes.
 - It is **not an open proxy**: it forwards only between two users your bot paired, or from a
   sharer to the viewers your bot admitted to a broadcast.
+- It is **actively maintained**: the current release is 0.3.0. See the
+  [changelog](https://github.com/Mumcord/mumpeer/blob/main/CHANGELOG.md) for what changed.
 
 ## Start here
 
@@ -19,7 +21,7 @@ connect to the relay, and it forwards their end-to-end encrypted packets to each
 | try it or set it up | [[Getting started]] |
 | change ports, limits or the secret | [[Configuration]] |
 | run it in production (systemd, Docker, port 443, logs) | [[Operating]] |
-| know what it protects and what the operator sees | [[Security and privacy]] |
+| know what it protects and what the operator sees, or report a vulnerability | [[Security and privacy]] |
 | fix a problem | [[Troubleshooting]] |
 | get a quick answer | [[FAQ]] |
 

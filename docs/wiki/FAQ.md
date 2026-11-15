@@ -2,7 +2,7 @@
 
 ## Do I need mumpeer?
 
-No. Mumcord works fully without it. Without a relay, screen sharing and full-size images work
+No. Mumcord works fully without it. Without a relay, screen sharing, camera sharing and full-size images work
 only when two users can connect directly, and users who hide their IP address cannot use them.
 mumpeer closes that gap for your community.
 
@@ -14,7 +14,7 @@ connects to it. The relay bot joins the server as an ordinary registered user.
 ## Does voice go through the relay?
 
 No. Voice and text chat always go through the Mumble server as before. The relay only carries
-Mumcord's peer-to-peer features: screen sharing and full-size images today.
+Mumcord's peer-to-peer features: screen sharing, camera sharing, full-size images, files and plugin data.
 
 ## Can the operator see or record screen shares?
 
@@ -79,8 +79,9 @@ after the bot leaves the server.
 Each session may use up to `session_mbit` (default 10 Mbit/s) in each direction; all sessions
 together up to `total_mbit` (default 200). Set `total_mbit` below your uplink. A typical screen
 share uses a few Mbit/s.
-A broadcast (one screen share shown to many viewers) adds one copy per viewer on your outgoing
-side, up to `broadcast_out_mbit` (default 300) per broadcast, so check your uplink before you
+A broadcast (one screen share or camera shown to many viewers) adds one copy per viewer on your
+outgoing side, up to `broadcast_out_mbit` (default 300) per broadcast (a camera sender uploads at most
+`camera_max_kbps`, default 2500), so check your uplink before you
 raise `max_viewers_per_broadcast`. See [[Configuration]].
 
 ## Can one relay serve several Mumble servers?
@@ -100,6 +101,17 @@ Yes. mumbot's
 [peer-with-relay example](https://github.com/Mumcord/mumbot/tree/main/examples/peer-with-relay)
 runs everything on one machine, and this repository's [`testenv/`](https://github.com/Mumcord/mumpeer/blob/main/testenv/README.md) adds
 network namespaces that simulate blocked direct connections and blocked UDP.
+
+## Does the relay relay plugin data?
+
+Yes, by default since 0.2.1, at the lowest priority and within its own limits. Set
+`[uses] plugin_data = false` to turn it off. See [[Configuration]].
+
+## Where do I report security problems?
+
+Privately, through the
+[security advisory form](https://github.com/Mumcord/mumpeer/security/advisories/new), never in
+a public issue. See [[Security and privacy]].
 
 ## Where do I report bugs?
 

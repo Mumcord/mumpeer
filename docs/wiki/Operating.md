@@ -46,29 +46,40 @@ IP addresses, full certificate hashes, tokens, the secret, packet contents.
   secrets get the caller's address blocked.
   The response includes `uses`, the enabled features from `[uses]`, and `broadcast` with
   `max_viewers` and `max_camera`. `broadcast` is absent when neither screen-share nor camera
-  broadcasts are possible (each off in `[uses]` or with a limit of 0).
-  `plugin_data` (with `max_kbps_per_sender`) is present unless `[uses] plugin_data = false`.
+  broadcasts are possible (each off in `[uses]` or with a limit of 0). `media` (the media
+  profile version) is present whenever `broadcast` is. `plugin_data` (with
+  `max_kbps_per_sender`) is present unless `[uses] plugin_data = false`.
 - Load: `totals` and `dropped` in the log.
 
 ## Broadcasts
 
-A broadcast is one screen share that the relay copies to many viewers, so the sharer uploads
+A broadcast is one screen share or camera that the relay copies to many viewers, so the sharer uploads
 only once. Your bot creates and manages them through the
 [bot API](https://github.com/Mumcord/mumpeer/blob/main/docs/api.md#broadcasts)
 (`/v1/broadcasts`); you only set the limits, see [[Configuration]].
 
-- They do not count against `max_sessions`; they have their own `max_broadcasts`. Watch
+- They do not count against `max_sessions`; screen shares have their own `max_broadcasts`,
+  cameras `max_camera_broadcasts`. Watch
   your uplink instead: each viewer is one more copy leaving your server.
 - When the bot removes a user (`DELETE /v1/peers/{hash}`), that user leaves every broadcast;
   if they were the sharer, the broadcast ends.
+- With the media profile (0.3.0), the relay keeps the latest stream description of a broadcast
+  so viewers who join late receive it; see [[Configuration]].
 - The relay forwards the sharer's video and audio to the admitted viewers. The stream stays
   end-to-end encrypted, so the relay cannot read it.
 
 ## Upgrading
 
 Read the [changelog](https://github.com/Mumcord/mumpeer/blob/main/CHANGELOG.md), switch the
-image tag or binary, restart. Keep the data volume. Running sessions end and are set up again
+image tag or binary, restart. Two changes to watch for: since 0.2.1 `[uses] plugin_data`
+defaults to `true` (set it to `false` to keep plugin data off), and the config rejects unknown
+keys. Keep the data volume. Running sessions end and are set up again
 when needed; the bot re-announces after it sees the new `boot_id`.
 
-Releases: [GitHub releases](https://github.com/Mumcord/mumpeer/releases) (static Linux
-binaries with `SHA256SUMS`) and `ghcr.io/mumcord/mumpeer:<version>`.
+Releases: [GitHub releases](https://github.com/Mumcord/mumpeer/releases) and the image
+`ghcr.io/mumcord/mumpeer:<version>` (for example `0.3.0`). Each release has
+`mumpeer-<version>-linux-x86_64.tar.gz` and `…-linux-aarch64.tar.gz` (static binaries) with
+`SHA256SUMS`, plus a software bill of materials (SBOM, CycloneDX JSON) for each binary
+(`mumpeer-<version>-linux-<arch>.cdx.json`) and each image platform
+(`mumpeer-<version>-docker-<platform>.cdx.json`), all listed in `SHA256SUMS`. Pin a version in
+production; `latest` follows the newest stable release.
