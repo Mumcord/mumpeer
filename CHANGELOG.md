@@ -6,6 +6,15 @@ All notable changes to mumpeer are listed here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Screen sharing through the relay works for a viewer that joins a running broadcast. The relay sent
+  the cached stream description to the late joiner without the framing every other message of the
+  media document has, so the viewer's client refused the whole document and no picture arrived.
+- A viewer's keyframe requests on a media broadcast are rate-limited again: at most one every 2 s per
+  viewer and one every 500 ms per broadcast. Before, every request reached the sharer, which encoded
+  a keyframe for each of them.
+
 ## [0.3.0] - 2026-11-15
 
 ### Added

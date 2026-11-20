@@ -113,6 +113,8 @@ pub const MAX_DESCRIPTION: usize = 8 * 1024;
 pub const DESCRIPTION_OVERHEAD: usize = 64;
 /// Control kind of the stream description.
 pub const KIND_DESCRIPTION: u8 = 0;
+/// Control kind of a keyframe request.
+pub const KIND_KEYFRAME: u8 = 3;
 
 /// The latest description ciphertext on one broadcast link (FR-7.100).
 ///
@@ -125,7 +127,9 @@ pub struct DescriptionCache {
 }
 
 impl DescriptionCache {
-    /// Stores `payload` when it is a channel-0 description message; returns whether it did.
+    /// Stores `payload` when it is a channel-0 description message; returns whether it did. It is
+    /// kept as the mux chunks of one message: the late joiner gets it inside its document, so a
+    /// bare payload would not parse there.
     pub fn store(&mut self, channel: u16, payload: &[u8]) -> bool {
         if channel != CHANNEL_CONTROL || payload.first() != Some(&KIND_DESCRIPTION) {
             return false;
@@ -133,10 +137,14 @@ impl DescriptionCache {
         if payload.len() > MAX_DESCRIPTION + DESCRIPTION_OVERHEAD {
             return false;
         }
-        self.latest = Some(bytes::Bytes::copy_from_slice(payload));
+        let Ok(framed) = encode_message(CHANNEL_CONTROL, payload) else {
+            return false;
+        };
+        self.latest = Some(framed);
         true
     }
 
+    /// The latest description as one message of the document, without the document's opening.
     pub fn latest(&self) -> Option<bytes::Bytes> {
         self.latest.clone()
     }
@@ -467,6 +475,16 @@ mod tests {
         assert_eq!(reader.next_meta(), Err(MediaError::OutOfProfile));
     }
 
+    /// The cached description as the late joiner reads it: the document's opening and the
+    /// cached bytes, read back as one channel-0 message.
+    fn cached_description(cache: &DescriptionCache) -> Option<Message> {
+        let mut unit = OPENING.to_vec();
+        unit.extend_from_slice(&cache.latest()?);
+        let mut reader = MessageReader::new();
+        reader.push(&unit);
+        reader.next_message().expect("the cache holds a message")
+    }
+
     #[test]
     fn only_the_latest_description_is_kept_and_size_checked() {
         let mut cache = DescriptionCache::default();
@@ -474,14 +492,23 @@ mod tests {
         assert!(!cache.store(0, &[3, 1]));
         assert!(cache.store(0, &[KIND_DESCRIPTION, 1, 2]));
         assert_eq!(
-            cache.latest().as_deref(),
-            Some(&[KIND_DESCRIPTION, 1, 2][..])
+            cached_description(&cache),
+            Some(Message {
+                channel: CHANNEL_CONTROL,
+                payload: vec![KIND_DESCRIPTION, 1, 2],
+            })
         );
         assert!(cache.store(0, &[KIND_DESCRIPTION, 3]));
-        assert_eq!(cache.latest().as_deref(), Some(&[KIND_DESCRIPTION, 3][..]));
+        assert_eq!(
+            cached_description(&cache).map(|m| m.payload),
+            Some(vec![KIND_DESCRIPTION, 3])
+        );
         let too_big = vec![KIND_DESCRIPTION; MAX_DESCRIPTION + DESCRIPTION_OVERHEAD + 1];
         assert!(!cache.store(0, &too_big));
-        assert_eq!(cache.latest().as_deref(), Some(&[KIND_DESCRIPTION, 3][..]));
+        assert_eq!(
+            cached_description(&cache).map(|m| m.payload),
+            Some(vec![KIND_DESCRIPTION, 3])
+        );
         cache.clear();
         assert_eq!(cache.latest(), None);
     }

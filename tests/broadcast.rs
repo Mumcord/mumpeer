@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use mumpeer::Running;
+use mumpeer::broadcast::media;
 use mumpeer::config::{ApiSecret, Config};
 use quinn::{Connection, RecvStream, SendStream};
 use rustls::DigitallySignedStruct;
@@ -191,6 +192,23 @@ fn bind(token: &str, role: Option<&str>) -> String {
         Some(role) => format!(r#"{{"v":1,"t":"bind","tok":"{token}","role":"{role}"}}"#),
         None => format!(r#"{{"v":1,"t":"bind","tok":"{token}"}}"#),
     }
+}
+
+/// A `bind` for a link that carries the media document (FR-7.96).
+fn bind_media(token: &str, role: &str) -> String {
+    format!(r#"{{"v":1,"t":"bind","tok":"{token}","role":"{role}","media":2}}"#)
+}
+
+/// Sends one message of a media document; the document's opening goes out with the first one,
+/// as the publisher's client writes it.
+async fn media_send(link: &Quic, first: &mut bool, channel: u16, payload: &[u8]) {
+    let mut unit = media::encode_message(channel, payload).unwrap().to_vec();
+    if std::mem::replace(first, false) {
+        let mut with_opening = media::OPENING.to_vec();
+        with_opening.extend_from_slice(&unit);
+        unit = with_opening;
+    }
+    link.send(&unit).await;
 }
 
 fn header(kind: u8, flags: u8, layer: u8, codec: u8, key: u8, seq: u32, len: usize) -> Vec<u8> {
@@ -476,6 +494,82 @@ async fn key_exchange_keyframe_requests_layers_and_gone() {
     let gone = publisher.recv().await;
     assert_eq!(kind_of(&gone), (3, GONE));
     assert_ne!(payload(&gone), b_slot);
+}
+
+/// A media broadcast (FR-7.89 … FR-7.94): the publisher uploads one endless document, and a late
+/// joiner reads its own document, whose first unit is the cached description — framed like every
+/// other message, so the client's document parser gets a document at all (FR-7.100).
+#[tokio::test]
+async fn a_media_broadcast_opens_the_document_for_a_late_joiner() {
+    let relay = relay("", "").await;
+    let publisher = identity();
+    let viewer = identity();
+    let (id, token) = create_for(&relay, &publisher, 4, r#","media":true"#).await;
+
+    let mut publisher_link = quic_bind(&relay, &publisher, &bind_media(&token, "pub")).await;
+    assert_eq!(publisher_link.control().await["t"], "ready");
+    // The description goes first: the relay caches it for a late joiner.
+    let description = [0u8, 9, 9, 9];
+    let mut first = true;
+    media_send(&publisher_link, &mut first, 0, &description).await;
+
+    let viewer_token = admit(&relay, &id, &viewer).await;
+    let mut viewer_link = quic_bind(&relay, &viewer, &bind_media(&viewer_token, "sub")).await;
+    assert_eq!(viewer_link.control().await["t"], "ready");
+
+    // The late joiner reads one document across the units the relay sends it.
+    let mut reader = media::MessageReader::new();
+    reader.push(&viewer_link.recv().await);
+    let cached = reader
+        .next_message()
+        .expect("the first unit opens the document")
+        .expect("the cached description is its first message");
+    assert_eq!(cached.channel, media::CHANNEL_CONTROL);
+    assert_eq!(cached.payload, description);
+
+    // What the publisher sends next follows on its own channel, inside the same document.
+    let frame = video(true, 0, 1, 40);
+    media_send(&publisher_link, &mut first, 1, &frame).await;
+    reader.push(&viewer_link.recv().await);
+    let second = reader
+        .next_message()
+        .expect("the document goes on")
+        .expect("a frame");
+    assert_eq!(second.channel, 1);
+    assert_eq!(second.payload, frame);
+
+    // A keyframe request from the viewer reaches the publisher as one framed control message,
+    // and the relay's limits hold: the next one right after does not (FR-7.87).
+    let mut viewer_first = true;
+    media_send(
+        &viewer_link,
+        &mut viewer_first,
+        media::CHANNEL_CONTROL,
+        &[media::KIND_KEYFRAME],
+    )
+    .await;
+    let mut requests = media::MessageReader::new();
+    requests.push(&publisher_link.recv().await);
+    let request = requests
+        .next_message()
+        .expect("a framed control message")
+        .expect("one message");
+    assert_eq!(request.channel, media::CHANNEL_CONTROL);
+    assert_eq!(request.payload, vec![media::KIND_KEYFRAME]);
+
+    media_send(
+        &viewer_link,
+        &mut viewer_first,
+        media::CHANNEL_CONTROL,
+        &[media::KIND_KEYFRAME],
+    )
+    .await;
+    assert!(
+        timeout(Duration::from_millis(300), publisher_link.recv())
+            .await
+            .is_err(),
+        "the second request is rate-limited"
+    );
 }
 
 #[tokio::test]

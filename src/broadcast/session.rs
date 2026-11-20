@@ -193,7 +193,8 @@ impl Session {
     }
 
     /// Forwards a keyframe request unless one went out too recently, for this subscriber or for
-    /// the broadcast as a whole.
+    /// the broadcast as a whole. It goes out in the format of this link, so the throttle holds on
+    /// a media link too (FR-7.87).
     fn request_keyframe(&self, from: Option<&Subscriber>, now: Instant) {
         let recent =
             |last: &Option<Instant>, gap| last.is_some_and(|at| now.duration_since(at) < gap);
@@ -214,7 +215,13 @@ impl Session {
         if let Some(own) = own.as_deref_mut() {
             *own = Some(now);
         }
-        self.to_publisher.push(Unit::keyframe_request());
+        if self.media {
+            if let Ok(bytes) = encode_message(media::CHANNEL_CONTROL, &[media::KIND_KEYFRAME]) {
+                self.to_publisher_media.push(bytes);
+            }
+        } else {
+            self.to_publisher.push(Unit::keyframe_request());
+        }
     }
 
     /// A message from a new-format publisher.
@@ -313,9 +320,9 @@ impl Session {
                 to_publisher(payload);
                 true
             }
-            3 => {
+            media::KIND_KEYFRAME => {
+                // The throttle decides whether the request goes out; it writes it framed.
                 self.request_keyframe(Some(from), now);
-                to_publisher(vec![kind]);
                 true
             }
             4 => {
@@ -1063,7 +1070,10 @@ mod tests {
             &total,
             now
         ));
-        assert_eq!(session.description().as_deref(), Some(&[0, 1, 2, 3][..]));
+        assert_eq!(
+            session.description().as_deref(),
+            Some(&media::encode_message(0, &[0, 1, 2, 3]).expect("framed")[..])
+        );
         assert!(a.media.try_pop().is_some());
         assert!(b.media.try_pop().is_some());
     }
@@ -1132,6 +1142,50 @@ mod tests {
         assert_eq!(count(&session), 1, "one per 2 s per subscriber");
         session.subscriber_unit(&a, kf(), start + Duration::from_millis(2100));
         assert_eq!(count(&session), 1);
+    }
+
+    /// A keyframe request on a media link goes out framed like every other control message, and
+    /// the same limits hold as on a legacy link (FR-7.87).
+    #[test]
+    fn media_keyframe_requests_are_framed_and_rate_limited() {
+        let mut session = Session::new(15, 300);
+        session.set_media();
+        let a = session.add(0);
+        let b = session.add(1);
+        let start = Instant::now();
+        let kf = || Message {
+            channel: media::CHANNEL_CONTROL,
+            payload: vec![media::KIND_KEYFRAME],
+        };
+        // Every request that reaches the publisher must be one message of the document; the
+        // opening is per link, so the test adds it as `with_opening` does.
+        let count = |session: &Session| {
+            let mut n = 0;
+            while let Some(bytes) = session.to_publisher_media.try_pop() {
+                let mut unit = media::OPENING.to_vec();
+                unit.extend_from_slice(&bytes);
+                let mut reader = media::MessageReader::new();
+                reader.push(&unit);
+                let message = reader
+                    .next_message()
+                    .expect("a framed control message")
+                    .expect("one message");
+                assert_eq!(message.channel, media::CHANNEL_CONTROL);
+                assert_eq!(message.payload, vec![media::KIND_KEYFRAME]);
+                n += 1;
+            }
+            n
+        };
+        assert!(session.subscriber_media(&a, kf(), start));
+        assert!(session.subscriber_media(&b, kf(), start + Duration::from_millis(100)));
+        assert_eq!(count(&session), 1, "one per 500 ms per broadcast");
+        assert!(session.subscriber_media(&b, kf(), start + Duration::from_millis(600)));
+        assert!(session.subscriber_media(&a, kf(), start + Duration::from_millis(1200)));
+        assert_eq!(count(&session), 1, "one per 2 s per subscriber");
+        assert!(session.subscriber_media(&a, kf(), start + Duration::from_millis(2100)));
+        assert_eq!(count(&session), 1);
+        // Nothing of this goes on the legacy queue of a media link.
+        assert!(pop_publisher(&session).is_none());
     }
 
     #[test]
