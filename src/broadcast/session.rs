@@ -1063,7 +1063,10 @@ mod tests {
             &total,
             now
         ));
-        assert_eq!(session.description().as_deref(), Some(&[0, 1, 2, 3][..]));
+        assert_eq!(
+            session.description().as_deref(),
+            Some(&media::encode_message(0, &[0, 1, 2, 3]).expect("framed")[..])
+        );
         assert!(a.media.try_pop().is_some());
         assert!(b.media.try_pop().is_some());
     }
