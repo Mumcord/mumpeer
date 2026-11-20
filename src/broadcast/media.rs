@@ -113,6 +113,8 @@ pub const MAX_DESCRIPTION: usize = 8 * 1024;
 pub const DESCRIPTION_OVERHEAD: usize = 64;
 /// Control kind of the stream description.
 pub const KIND_DESCRIPTION: u8 = 0;
+/// Control kind of a keyframe request.
+pub const KIND_KEYFRAME: u8 = 3;
 
 /// The latest description ciphertext on one broadcast link (FR-7.100).
 ///

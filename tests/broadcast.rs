@@ -537,6 +537,39 @@ async fn a_media_broadcast_opens_the_document_for_a_late_joiner() {
         .expect("a frame");
     assert_eq!(second.channel, 1);
     assert_eq!(second.payload, frame);
+
+    // A keyframe request from the viewer reaches the publisher as one framed control message,
+    // and the relay's limits hold: the next one right after does not (FR-7.87).
+    let mut viewer_first = true;
+    media_send(
+        &viewer_link,
+        &mut viewer_first,
+        media::CHANNEL_CONTROL,
+        &[media::KIND_KEYFRAME],
+    )
+    .await;
+    let mut requests = media::MessageReader::new();
+    requests.push(&publisher_link.recv().await);
+    let request = requests
+        .next_message()
+        .expect("a framed control message")
+        .expect("one message");
+    assert_eq!(request.channel, media::CHANNEL_CONTROL);
+    assert_eq!(request.payload, vec![media::KIND_KEYFRAME]);
+
+    media_send(
+        &viewer_link,
+        &mut viewer_first,
+        media::CHANNEL_CONTROL,
+        &[media::KIND_KEYFRAME],
+    )
+    .await;
+    assert!(
+        timeout(Duration::from_millis(300), publisher_link.recv())
+            .await
+            .is_err(),
+        "the second request is rate-limited"
+    );
 }
 
 #[tokio::test]
