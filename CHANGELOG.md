@@ -6,6 +6,8 @@ All notable changes to mumpeer are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-21
+
 ### Fixed
 
 - Screen sharing through the relay works for a viewer that joins a running broadcast. The relay sent
